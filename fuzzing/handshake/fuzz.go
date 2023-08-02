@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	mrand "math/rand"
+	"net"
 	"time"
 
 	tls "github.com/refraction-networking/utls"
@@ -305,6 +306,8 @@ func runHandshake(runConfig [confLen]byte, messageConfig uint8, clientConf *tls.
 
 	server := handshake.NewCryptoSetupServer(
 		protocol.ConnectionID{},
+		&net.UDPAddr{IP: net.IPv6loopback, Port: 1234},
+		&net.UDPAddr{IP: net.IPv6loopback, Port: 4321},
 		serverTP,
 		serverConf,
 		enable0RTTServer,

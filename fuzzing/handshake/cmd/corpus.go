@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net"
 
 	tls "github.com/refraction-networking/utls"
 
@@ -38,6 +39,8 @@ func main() {
 	config.NextProtos = []string{alpn}
 	server := handshake.NewCryptoSetupServer(
 		protocol.ConnectionID{},
+		&net.UDPAddr{IP: net.IPv6loopback, Port: 1234},
+		&net.UDPAddr{IP: net.IPv6loopback, Port: 4321},
 		&wire.TransportParameters{ActiveConnectionIDLimit: 2},
 		config,
 		false,

@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"math/big"
+	"net"
 	"time"
 
 	tls "github.com/refraction-networking/utls"
@@ -66,6 +67,8 @@ var _ = Describe("Crypto Setup TLS", func() {
 		var token protocol.StatelessResetToken
 		server := NewCryptoSetupServer(
 			protocol.ConnectionID{},
+			&net.UDPAddr{IP: net.IPv6loopback, Port: 1234},
+			&net.UDPAddr{IP: net.IPv6loopback, Port: 4321},
 			&wire.TransportParameters{StatelessResetToken: &token},
 			testdata.GetTLSConfig(),
 			false,
@@ -205,6 +208,8 @@ var _ = Describe("Crypto Setup TLS", func() {
 			}
 			server := NewCryptoSetupServer(
 				protocol.ConnectionID{},
+				&net.UDPAddr{IP: net.IPv6loopback, Port: 1234},
+				&net.UDPAddr{IP: net.IPv6loopback, Port: 4321},
 				serverTransportParameters,
 				serverConf,
 				enable0RTT,
@@ -274,6 +279,8 @@ var _ = Describe("Crypto Setup TLS", func() {
 			}
 			server := NewCryptoSetupServer(
 				protocol.ConnectionID{},
+				&net.UDPAddr{IP: net.IPv6loopback, Port: 1234},
+				&net.UDPAddr{IP: net.IPv6loopback, Port: 4321},
 				sTransportParameters,
 				serverConf,
 				false,
