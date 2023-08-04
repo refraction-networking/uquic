@@ -6,9 +6,8 @@ import (
 	"net"
 	"time"
 
+	quic "github.com/refraction-networking/uquic"
 	tls "github.com/refraction-networking/utls"
-
-	"github.com/quic-go/quic-go"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

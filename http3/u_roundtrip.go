@@ -7,7 +7,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/quic-go/quic-go"
+	quic "github.com/refraction-networking/uquic"
 	tls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http/httpguts"
 )

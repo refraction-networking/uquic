@@ -6,7 +6,7 @@ import (
 	"errors"
 
 	"github.com/gaukas/clienthellod"
-	"github.com/quic-go/quic-go/quicvarint"
+	"github.com/refraction-networking/uquic/quicvarint"
 )
 
 type InitialPacketSpec struct {

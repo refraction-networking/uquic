@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	quic "github.com/refraction-networking/uquic"
 	tls "github.com/refraction-networking/utls"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/internal/qerr"
+	"github.com/refraction-networking/uquic/internal/qerr"
 
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"

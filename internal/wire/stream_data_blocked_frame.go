@@ -3,8 +3,8 @@ package wire
 import (
 	"bytes"
 
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/quicvarint"
+	"github.com/refraction-networking/uquic/internal/protocol"
+	"github.com/refraction-networking/uquic/quicvarint"
 )
 
 // A StreamDataBlockedFrame is a STREAM_DATA_BLOCKED frame

@@ -11,12 +11,12 @@ import (
 
 	tls "github.com/refraction-networking/utls"
 
-	mocktls "github.com/quic-go/quic-go/internal/mocks/tls"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/testdata"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
+	mocktls "github.com/refraction-networking/uquic/internal/mocks/tls"
+	"github.com/refraction-networking/uquic/internal/protocol"
+	"github.com/refraction-networking/uquic/internal/qerr"
+	"github.com/refraction-networking/uquic/internal/testdata"
+	"github.com/refraction-networking/uquic/internal/utils"
+	"github.com/refraction-networking/uquic/internal/wire"
 
 	"github.com/golang/mock/gomock"
 

@@ -4,11 +4,11 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/quic-go/quic-go/internal/ackhandler"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/utils/ringbuffer"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/quicvarint"
+	"github.com/refraction-networking/uquic/internal/ackhandler"
+	"github.com/refraction-networking/uquic/internal/protocol"
+	"github.com/refraction-networking/uquic/internal/utils/ringbuffer"
+	"github.com/refraction-networking/uquic/internal/wire"
+	"github.com/refraction-networking/uquic/quicvarint"
 )
 
 type framer interface {

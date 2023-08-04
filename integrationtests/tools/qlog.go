@@ -8,10 +8,10 @@ import (
 	"log"
 	"os"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/logging"
-	"github.com/quic-go/quic-go/qlog"
+	quic "github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic/internal/utils"
+	"github.com/refraction-networking/uquic/logging"
+	"github.com/refraction-networking/uquic/qlog"
 )
 
 func NewQlogger(logger io.Writer) func(context.Context, logging.Perspective, quic.ConnectionID) logging.ConnectionTracer {

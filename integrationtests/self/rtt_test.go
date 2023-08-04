@@ -7,8 +7,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	quicproxy "github.com/quic-go/quic-go/integrationtests/tools/proxy"
+	quic "github.com/refraction-networking/uquic"
+	quicproxy "github.com/refraction-networking/uquic/integrationtests/tools/proxy"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

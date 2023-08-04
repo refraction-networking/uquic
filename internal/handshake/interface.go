@@ -7,8 +7,8 @@ import (
 
 	tls "github.com/refraction-networking/utls"
 
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/wire"
+	"github.com/refraction-networking/uquic/internal/protocol"
+	"github.com/refraction-networking/uquic/internal/wire"
 )
 
 var (

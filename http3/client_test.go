@@ -11,13 +11,13 @@ import (
 	"sync"
 	"time"
 
+	quic "github.com/refraction-networking/uquic"
 	tls "github.com/refraction-networking/utls"
 
-	"github.com/quic-go/quic-go"
-	mockquic "github.com/quic-go/quic-go/internal/mocks/quic"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/quicvarint"
+	mockquic "github.com/refraction-networking/uquic/internal/mocks/quic"
+	"github.com/refraction-networking/uquic/internal/protocol"
+	"github.com/refraction-networking/uquic/internal/utils"
+	"github.com/refraction-networking/uquic/quicvarint"
 
 	"github.com/golang/mock/gomock"
 	"github.com/quic-go/qpack"

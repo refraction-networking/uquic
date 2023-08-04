@@ -3,7 +3,7 @@ package qerr
 import (
 	"fmt"
 
-	"github.com/quic-go/quic-go/internal/qtls"
+	"github.com/refraction-networking/uquic/internal/qtls"
 )
 
 // TransportErrorCode is a QUIC transport error.

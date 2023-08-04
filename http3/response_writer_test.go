@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	mockquic "github.com/quic-go/quic-go/internal/mocks/quic"
-	"github.com/quic-go/quic-go/internal/utils"
+	mockquic "github.com/refraction-networking/uquic/internal/mocks/quic"
+	"github.com/refraction-networking/uquic/internal/utils"
 
 	"github.com/golang/mock/gomock"
 	"github.com/quic-go/qpack"

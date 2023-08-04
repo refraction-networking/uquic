@@ -11,11 +11,10 @@ import (
 	"sync"
 	"sync/atomic"
 
+	quic "github.com/refraction-networking/uquic"
 	tls "github.com/refraction-networking/utls"
 
 	"golang.org/x/net/http/httpguts"
-
-	"github.com/quic-go/quic-go"
 )
 
 type roundTripCloser interface {

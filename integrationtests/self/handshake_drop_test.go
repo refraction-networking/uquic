@@ -10,13 +10,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	quic "github.com/refraction-networking/uquic"
 	tls "github.com/refraction-networking/utls"
 
-	"github.com/quic-go/quic-go/quicvarint"
+	"github.com/refraction-networking/uquic/quicvarint"
 
-	"github.com/quic-go/quic-go"
-	quicproxy "github.com/quic-go/quic-go/integrationtests/tools/proxy"
-	"github.com/quic-go/quic-go/internal/wire"
+	quicproxy "github.com/refraction-networking/uquic/integrationtests/tools/proxy"
+	"github.com/refraction-networking/uquic/internal/wire"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

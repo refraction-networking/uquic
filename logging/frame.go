@@ -1,6 +1,6 @@
 package logging
 
-import "github.com/quic-go/quic-go/internal/wire"
+import "github.com/refraction-networking/uquic/internal/wire"
 
 // A Frame is a QUIC frame
 type Frame interface{}

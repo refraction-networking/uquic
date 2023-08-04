@@ -1,6 +1,6 @@
 package quic
 
-import "github.com/quic-go/quic-go/internal/protocol"
+import "github.com/refraction-networking/uquic/internal/protocol"
 
 type sender interface {
 	Send(p *packetBuffer, packetSize protocol.ByteCount)

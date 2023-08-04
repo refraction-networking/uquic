@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/internal/utils"
+	quic "github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic/internal/utils"
 )
 
 // A Stream is a HTTP/3 stream.

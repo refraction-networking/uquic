@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"io"
 
-	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/refraction-networking/uquic/internal/protocol"
 )
 
 // A PathResponseFrame is a PATH_RESPONSE frame

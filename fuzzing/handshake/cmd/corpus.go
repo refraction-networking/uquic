@@ -6,13 +6,13 @@ import (
 
 	tls "github.com/refraction-networking/utls"
 
-	fuzzhandshake "github.com/quic-go/quic-go/fuzzing/handshake"
-	"github.com/quic-go/quic-go/fuzzing/internal/helper"
-	"github.com/quic-go/quic-go/internal/handshake"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/testdata"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
+	fuzzhandshake "github.com/refraction-networking/uquic/fuzzing/handshake"
+	"github.com/refraction-networking/uquic/fuzzing/internal/helper"
+	"github.com/refraction-networking/uquic/internal/handshake"
+	"github.com/refraction-networking/uquic/internal/protocol"
+	"github.com/refraction-networking/uquic/internal/testdata"
+	"github.com/refraction-networking/uquic/internal/utils"
+	"github.com/refraction-networking/uquic/internal/wire"
 )
 
 const alpn = "fuzz"
