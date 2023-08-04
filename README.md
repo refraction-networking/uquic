@@ -1,4 +1,4 @@
-# ![uTLS](docs/utls_logo_small.png) <img src="docs/quic.svg" alt="drawing" width="200"/> uQUIC
+# ![uTLS](docs/utls_logo_small.png) <img src="docs/quic.png" alt="drawing" width="200"/> uQUIC
 [![Build Status](https://github.com/refraction-networking/uquic/actions/workflows/go_1_20.yml/badge.svg?branch=master)](https://github.com/refraction-networking/uquic/actions)[![Build Status](https://github.com/refraction-networking/uquic/actions/workflows/go_1_21.yml/badge.svg?branch=master)](https://github.com/refraction-networking/uquic/actions)
 [![godoc](https://img.shields.io/badge/godoc-reference-blue.svg)](https://godoc.org/github.com/refraction-networking/uquic)
 ---
