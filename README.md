@@ -10,6 +10,25 @@ If you have any questions, bug reports or contributions, you are welcome to publ
 
 Development is still in progress and we welcome any contributions adding new features or fixing extant bugs.
 
+# Development in Progress
+## Development Roadmap
+- [ ] Customize Initial Packet 
+	- [x] QUIC Header 
+	- [ ] QUIC Frame ([#3](https://github.com/gaukas/uquic/issues/3))
+		- [x] QUIC Crypto Frame
+		- [x] QUIC Padding Frame
+		- [x] QUIC Ping Frame
+		- [ ] QUIC ACK Frame
+	- [x] TLS ClientHello Message (by [uTLS](https://github.com/refraction-networking/utls))
+		- [x] QUIC Transport Parameters (in a uTLS extension)
+- [ ] Customize Initial ACK behavior ([#1](https://github.com/gaukas/uquic/issues/1), [quic-go#4007](https://github.com/quic-go/quic-go/issues/4007))
+- [ ] Customize Initial Retry behavior ([#2](https://github.com/gaukas/uquic/issues/2))
+- [ ] Add preset QUIC parrots
+	- [ ] Google Chrome parrot
+	- [ ] Mozilla Firefox parrot
+	- [ ] Apple Safari parrot
+	- [ ] Microsoft Edge parrot
+
 # Features
 ## Initial Packet fingerprinting resistance
 uQUIC provides a mechanism to customize the Initial Packet, which is unencrypted and is almost unique to every QUIC client implementation. We provide an interface to customize the Initial Packet and makes the fingerprinting of QUIC clients harder.
