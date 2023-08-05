@@ -1,5 +1,6 @@
 # ![uTLS](docs/utls_logo_small.png) <img src="docs/quic.png" alt="drawing" width="200"/> uQUIC
-[![Build Status](https://github.com/refraction-networking/uquic/actions/workflows/go_1_20.yml/badge.svg?branch=master)](https://github.com/refraction-networking/uquic/actions)[![Build Status](https://github.com/refraction-networking/uquic/actions/workflows/go_1_21.yml/badge.svg?branch=master)](https://github.com/refraction-networking/uquic/actions)
+[![Build Status](https://github.com/refraction-networking/uquic/actions/workflows/go1.20.yml/badge.svg?branch=master)](https://github.com/gaukas/uquic/actions/workflows/go1.20.yml)
+[![Build Status](https://github.com/refraction-networking/uquic/actions/workflows/go1.21.yml/badge.svg?branch=master)](https://github.com/gaukas/uquic/actions/workflows/go1.21.yml)
 [![godoc](https://img.shields.io/badge/godoc-reference-blue.svg)](https://godoc.org/github.com/refraction-networking/uquic)
 ---
 uQUIC is a fork of [quic-go](https://github.com/refraction-networking/uquic), which provides Initial Packet fingerprinting resistance and other features. While the handshake is still performed by quic-go, this library provides interface to customize the unencrypted Initial Packet which may reveal fingerprint-able information. 
