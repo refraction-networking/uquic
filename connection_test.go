@@ -35,7 +35,7 @@ import (
 func areConnsRunning() bool {
 	var b bytes.Buffer
 	pprof.Lookup("goroutine").WriteTo(&b, 1)
-	return strings.Contains(b.String(), "quic-go.(*connection).run")
+	return strings.Contains(b.String(), "uquic.(*connection).run")
 }
 
 var _ = Describe("Connection", func() {
