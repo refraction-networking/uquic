@@ -36,8 +36,8 @@ func main() {
 	}
 	uRoundTripper := http3.GetURoundTripper(
 		roundTripper,
-		// getFFQUICSpec(),
-		getCRQUICSpec(),
+		getFFQUICSpec(),
+		// getCRQUICSpec(),
 		nil,
 	)
 	defer uRoundTripper.Close()
@@ -69,24 +69,12 @@ func getFFQUICSpec() *quic.QUICSpec {
 			SrcConnIDLength:        3,
 			DestConnIDLength:       8,
 			InitPacketNumberLength: 1,
-			InitPacketNumber:       1,
+			InitPacketNumber:       0,
 			ClientTokenLength:      0,
-			FrameOrder: quic.QUICFrames{
-				&quic.QUICFrameCrypto{
-					Offset: 300,
-					Length: 0,
-				},
-				&quic.QUICFramePadding{
-					Length: 125,
-				},
-				&quic.QUICFramePing{},
-				&quic.QUICFrameCrypto{
-					Offset: 0,
-					Length: 300,
-				},
-			},
+			FrameOrder:             quic.QUICFrames{}, // empty = single crypto
 		},
-		ClientHelloSpec: getFFCHS(),
+		ClientHelloSpec:    getFFCHS(),
+		UDPDatagramMinSize: 1357,
 	}
 }
 
@@ -140,9 +128,6 @@ func getFFCHS() *tls.ClientHelloSpec {
 					{
 						Group: tls.X25519,
 					},
-					// {
-					// 	Group: tls.CurveP256,
-					// },
 				},
 			},
 			&tls.SupportedVersionsExtension{
