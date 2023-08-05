@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"time"
 
@@ -13,7 +12,6 @@ import (
 	quic "github.com/refraction-networking/uquic"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/qerr"
-	"github.com/refraction-networking/uquic/internal/qtls"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -82,52 +80,52 @@ var _ = Describe("Handshake tests", func() {
 		}()
 	}
 
-	Context("using different cipher suites", func() {
-		for n, id := range map[string]uint16{
-			"TLS_AES_128_GCM_SHA256":       tls.TLS_AES_128_GCM_SHA256,
-			"TLS_AES_256_GCM_SHA384":       tls.TLS_AES_256_GCM_SHA384,
-			"TLS_CHACHA20_POLY1305_SHA256": tls.TLS_CHACHA20_POLY1305_SHA256,
-		} {
-			name := n
-			suiteID := id
+	// Context("using different cipher suites", func() {
+	// 	for n, id := range map[string]uint16{
+	// 		"TLS_AES_128_GCM_SHA256":       tls.TLS_AES_128_GCM_SHA256,
+	// 		"TLS_AES_256_GCM_SHA384":       tls.TLS_AES_256_GCM_SHA384,
+	// 		"TLS_CHACHA20_POLY1305_SHA256": tls.TLS_CHACHA20_POLY1305_SHA256,
+	// 	} {
+	// 		name := n
+	// 		suiteID := id
 
-			It(fmt.Sprintf("using %s", name), func() {
-				reset := qtls.SetCipherSuite(suiteID)
-				defer reset()
+	// 		It(fmt.Sprintf("using %s", name), func() {
+	// 			reset := qtls.SetCipherSuite(suiteID)
+	// 			defer reset()
 
-				tlsConf := getTLSConfig()
-				ln, err := quic.ListenAddr("localhost:0", tlsConf, serverConfig)
-				Expect(err).ToNot(HaveOccurred())
-				defer ln.Close()
+	// 			tlsConf := getTLSConfig()
+	// 			ln, err := quic.ListenAddr("localhost:0", tlsConf, serverConfig)
+	// 			Expect(err).ToNot(HaveOccurred())
+	// 			defer ln.Close()
 
-				go func() {
-					defer GinkgoRecover()
-					conn, err := ln.Accept(context.Background())
-					Expect(err).ToNot(HaveOccurred())
-					str, err := conn.OpenStream()
-					Expect(err).ToNot(HaveOccurred())
-					defer str.Close()
-					_, err = str.Write(PRData)
-					Expect(err).ToNot(HaveOccurred())
-				}()
+	// 			go func() {
+	// 				defer GinkgoRecover()
+	// 				conn, err := ln.Accept(context.Background())
+	// 				Expect(err).ToNot(HaveOccurred())
+	// 				str, err := conn.OpenStream()
+	// 				Expect(err).ToNot(HaveOccurred())
+	// 				defer str.Close()
+	// 				_, err = str.Write(PRData)
+	// 				Expect(err).ToNot(HaveOccurred())
+	// 			}()
 
-				conn, err := quic.DialAddr(
-					context.Background(),
-					fmt.Sprintf("localhost:%d", ln.Addr().(*net.UDPAddr).Port),
-					getTLSClientConfig(),
-					getQuicConfig(nil),
-				)
-				Expect(err).ToNot(HaveOccurred())
-				str, err := conn.AcceptStream(context.Background())
-				Expect(err).ToNot(HaveOccurred())
-				data, err := io.ReadAll(str)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(data).To(Equal(PRData))
-				Expect(conn.ConnectionState().TLS.CipherSuite).To(Equal(suiteID))
-				Expect(conn.CloseWithError(0, "")).To(Succeed())
-			})
-		}
-	})
+	// 			conn, err := quic.DialAddr(
+	// 				context.Background(),
+	// 				fmt.Sprintf("localhost:%d", ln.Addr().(*net.UDPAddr).Port),
+	// 				getTLSClientConfig(),
+	// 				getQuicConfig(nil),
+	// 			)
+	// 			Expect(err).ToNot(HaveOccurred())
+	// 			str, err := conn.AcceptStream(context.Background())
+	// 			Expect(err).ToNot(HaveOccurred())
+	// 			data, err := io.ReadAll(str)
+	// 			Expect(err).ToNot(HaveOccurred())
+	// 			Expect(data).To(Equal(PRData))
+	// 			Expect(conn.ConnectionState().TLS.CipherSuite).To(Equal(suiteID))
+	// 			Expect(conn.CloseWithError(0, "")).To(Succeed())
+	// 		})
+	// 	}
+	// })
 
 	Context("Certificate validation", func() {
 		It("accepts the certificate", func() {

@@ -10,7 +10,8 @@ import (
 )
 
 type (
-	QUICConn            = tls.UQUICConn // [UQUIC]
+	QUICConn            = tls.QUICConn
+	UQUICConn           = tls.UQUICConn // [UQUIC]
 	QUICConfig          = tls.QUICConfig
 	QUICEvent           = tls.QUICEvent
 	QUICEventKind       = tls.QUICEventKind
@@ -36,15 +37,16 @@ const (
 	QUICHandshakeDone               = tls.QUICHandshakeDone
 )
 
-func QUICServer(config *QUICConfig) *QUICConn { return nil } // [UQUIC]
+func QUICServer(config *QUICConfig) *QUICConn {
+	return tls.QUICServer(config)
+}
 
-// [UQUIC]
 func QUICClient(config *QUICConfig) *QUICConn {
-	return tls.UQUICClient(config, tls.HelloGolang)
+	return tls.QUICClient(config)
 }
 
 // [UQUIC]
-func UQUICClient(config *QUICConfig, clientHelloSpec *tls.ClientHelloSpec) *QUICConn {
+func UQUICClient(config *QUICConfig, clientHelloSpec *tls.ClientHelloSpec) *UQUICConn {
 	uqc := tls.UQUICClient(config, tls.HelloCustom)
 	if err := uqc.ApplyPreset(clientHelloSpec); err != nil {
 		panic(err)
