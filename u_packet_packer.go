@@ -1,8 +1,10 @@
 package quic
 
 import (
+	"bytes"
 	"fmt"
 
+	"github.com/gaukas/clienthellod"
 	"github.com/refraction-networking/uquic/internal/handshake"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/wire"
@@ -234,10 +236,23 @@ func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.Versi
 		}
 	}
 
-	uPayload, err := p.uSpec.InitialPacketSpec.FrameOrder.MarshalWithFrames(originalFrameBytes)
+	// extract CryptoData from originalFrameBytes
+	// parse frames
+	r := bytes.NewReader(originalFrameBytes)
+	qchframes, err := clienthellod.ReadAllFrames(r)
 	if err != nil {
 		return nil, err
 	}
 
-	return uPayload, nil
+	// parse crypto data
+	cryptoData, err := clienthellod.ReassembleCRYPTOFrames(qchframes)
+	if err != nil {
+		return nil, err
+	}
+
+	if p.uSpec.InitialPacketSpec.FrameBuilder == nil {
+		qfs := QUICFrames{}
+		return qfs.Build(cryptoData)
+	}
+	return p.uSpec.InitialPacketSpec.FrameBuilder.Build(cryptoData)
 }

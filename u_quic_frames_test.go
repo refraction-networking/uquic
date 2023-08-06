@@ -7,14 +7,14 @@ import (
 	"github.com/gaukas/clienthellod"
 )
 
-func TestQUICFramesMarshalWithCryptoData(t *testing.T) {
-	resultQUICPayload, err := testQUICFrames.MarshalWithCryptoData(testCryptoFrameBytes)
+func TestQUICFrames(t *testing.T) {
+	resultQUICPayload, err := testQUICFrames.Build(testCryptoFrameBytes)
 	if err != nil {
-		t.Fatalf("Failed to marshal QUIC frames: %v", err)
+		t.Fatalf("Failed to build QUIC frames: %v", err)
 	}
 
-	if len(resultQUICPayload) != len(truthQUICPayload) {
-		t.Fatalf("QUIC payload length mismatch: got %d, want %d. \n%x", len(resultQUICPayload), len(truthQUICPayload), resultQUICPayload)
+	if len(resultQUICPayload) != len(truthPayloadFromQUICFrames) {
+		t.Fatalf("QUIC payload length mismatch: got %d, want %d. \n%x", len(resultQUICPayload), len(truthPayloadFromQUICFrames), resultQUICPayload)
 	}
 
 	// verify that the crypto frames would actually assemble the original crypto data
@@ -30,6 +30,51 @@ func TestQUICFramesMarshalWithCryptoData(t *testing.T) {
 	}
 	if !bytes.Equal(reassembledCryptoData, testCryptoFrameBytes) {
 		t.Fatalf("Reassembled crypto data mismatch: \n%x", reassembledCryptoData)
+	}
+}
+
+func TestQUICRandomFrames(t *testing.T) {
+	resultQUICPayload, err := testQUICRandomFrames.Build(testCryptoFrameBytes)
+	if err != nil {
+		t.Fatalf("Failed to build QUIC frames: %v", err)
+	}
+
+	if len(resultQUICPayload) != 512 {
+		t.Fatalf("QUIC payload length mismatch: got %d, want 512. \n%x", len(resultQUICPayload), resultQUICPayload)
+	}
+
+	// verify that the crypto frames would actually assemble the original crypto data
+	r := bytes.NewReader(resultQUICPayload)
+	qchframes, err := clienthellod.ReadAllFrames(r)
+	if err != nil {
+		t.Fatalf("Failed to read QUIC frames: %v", err)
+	}
+
+	reassembledCryptoData, err := clienthellod.ReassembleCRYPTOFrames(qchframes)
+	if err != nil {
+		t.Fatalf("Failed to reassemble crypto data: %v", err)
+	}
+	if !bytes.Equal(reassembledCryptoData, testCryptoFrameBytes) {
+		t.Fatalf("Reassembled crypto data mismatch: \n%x", reassembledCryptoData)
+	}
+
+	// count how many PING and CRYPTO frames are in the QUIC payload
+	var pingCount, cryptoCount int
+	for _, frame := range qchframes {
+		switch frame.FrameType() {
+		case clienthellod.QUICFrame_PING:
+			pingCount++
+		case clienthellod.QUICFrame_CRYPTO:
+			cryptoCount++
+		}
+	}
+
+	if pingCount < 2 || pingCount > 8 {
+		t.Fatalf("PING frame count mismatch: got %d, want 2-8", pingCount)
+	}
+
+	if cryptoCount < 2 || cryptoCount > 8 {
+		t.Fatalf("CRYPTO frame count mismatch: got %d, want 2-8", cryptoCount)
 	}
 }
 
@@ -77,7 +122,7 @@ var (
 		&QUICFramePadding{Length: 45},
 	}
 
-	truthQUICPayload = []byte{
+	truthPayloadFromQUICFrames = []byte{
 		0x01, // ping
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -114,5 +159,15 @@ var (
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00, 0x00, // 45 bytes of padding
+	}
+
+	testQUICRandomFrames = QUICRandomFrames{
+		MinPING:    2,
+		MaxPING:    8,
+		MinCRYPTO:  2,
+		MaxCRYPTO:  8,
+		MinPADDING: 4,
+		MaxPADDING: 5,
+		Length:     512,
 	}
 )
