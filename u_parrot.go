@@ -386,7 +386,7 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 								LegacyID: true,
 							},
 							tls.InitialMaxStreamsUni(16),
-							&tls.GREASE{
+							&tls.GREASETransportParameter{
 								Length: 2, // Firefox uses 2-byte GREASE values
 							},
 							tls.InitialMaxStreamDataBidiLocal(0xc00000),
@@ -510,7 +510,7 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 								LegacyID: true,
 							},
 							tls.InitialMaxStreamsUni(16),
-							&tls.GREASE{
+							&tls.GREASETransportParameter{
 								Length: 2, // Firefox uses 2-byte GREASE values
 							},
 							tls.InitialMaxStreamDataBidiLocal(0xc00000),
@@ -634,7 +634,7 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 								LegacyID: true,
 							},
 							tls.InitialMaxStreamsUni(16),
-							&tls.GREASE{
+							&tls.GREASETransportParameter{
 								Length: 2,
 							},
 							tls.InitialMaxStreamDataBidiLocal(0xc00000),
@@ -672,7 +672,7 @@ func ShuffleQUICTransportParameters(qtp *tls.QUICTransportParametersExtension) *
 	return qtp
 }
 
-func VariableLengthGREASEQTP(maxLen int) *tls.GREASE {
+func VariableLengthGREASEQTP(maxLen int) *tls.GREASETransportParameter {
 	// get random length for GREASE
 	greaseMaxLen := big.NewInt(0x10)
 	greaseLen, err := rand.Int(rand.Reader, greaseMaxLen)
@@ -680,7 +680,7 @@ func VariableLengthGREASEQTP(maxLen int) *tls.GREASE {
 		panic(err)
 	}
 
-	return &tls.GREASE{
+	return &tls.GREASETransportParameter{
 		Length: uint16(greaseLen.Uint64()),
 	}
 }
