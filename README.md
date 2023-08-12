@@ -24,15 +24,15 @@ If you are interested in our research, please stay tuned for our paper.
 ## Development Roadmap
 - [ ] Customize Initial Packet 
 	- [x] QUIC Header 
-	- [x] QUIC Frame (~~[#3](https://github.com/gaukas/uquic/issues/3)~~)
+	- [x] QUIC Frame (~~[#3](https://github.com/refraction-networking/uquic/issues/3)~~)
 		- [x] QUIC Crypto Frame
 		- [x] QUIC Padding Frame
 		- [x] QUIC Ping Frame
 		- [ ] QUIC ACK Frame (on hold)
 	- [x] TLS ClientHello Message (by [uTLS](https://github.com/refraction-networking/utls))
 		- [x] QUIC Transport Parameters (in a uTLS extension)
-- [ ] Customize Initial ACK behavior ([#1](https://github.com/gaukas/uquic/issues/1), [quic-go#4007](https://github.com/quic-go/quic-go/issues/4007))
-- [ ] Customize Initial Retry behavior ([#2](https://github.com/gaukas/uquic/issues/2))
+- [ ] Customize Initial ACK behavior ([#1](https://github.com/refraction-networking/uquic/issues/1), [quic-go#4007](https://github.com/quic-go/quic-go/issues/4007))
+- [ ] Customize Initial Retry behavior ([#2](https://github.com/refraction-networking/uquic/issues/2))
 - [ ] Add preset QUIC parrots
 	- [x] Google Chrome parrot (call for parrots w/ `Token/PSK`)
 	- [x] Mozilla Firefox parrot (call for parrots w/ `Token/PSK`)
