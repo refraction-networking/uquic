@@ -6,10 +6,9 @@ import (
 
 	"github.com/refraction-networking/uquic/internal/protocol"
 
-	"github.com/golang/mock/gomock"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 )
 
 var _ = Describe("Basic Conn Test", func() {

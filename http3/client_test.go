@@ -19,11 +19,11 @@ import (
 	"github.com/refraction-networking/uquic/internal/utils"
 	"github.com/refraction-networking/uquic/quicvarint"
 
-	"github.com/golang/mock/gomock"
 	"github.com/quic-go/qpack"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 )
 
 var _ = Describe("Client", func() {

@@ -201,6 +201,8 @@ var _ = Describe("Handshake tests", func() {
 			Expect(errors.As(err, &transportErr)).To(BeTrue())
 			Expect(transportErr.ErrorCode.IsCryptoError()).To(BeTrue())
 			Expect(transportErr.Error()).To(ContainSubstring("x509: certificate is valid for localhost, not foo.bar"))
+			var certErr *tls.CertificateVerificationError
+			Expect(errors.As(transportErr, &certErr)).To(BeTrue())
 		})
 
 		It("fails the handshake if the client fails to provide the requested client cert", func() {
@@ -452,7 +454,7 @@ var _ = Describe("Handshake tests", func() {
 
 		It("rejects invalid Retry token with the INVALID_TOKEN error", func() {
 			serverConfig.RequireAddressValidation = func(net.Addr) bool { return true }
-			serverConfig.MaxRetryTokenAge = time.Nanosecond
+			serverConfig.MaxRetryTokenAge = -time.Second
 
 			server, err := quic.ListenAddr("localhost:0", getTLSConfig(), serverConfig)
 			Expect(err).ToNot(HaveOccurred())

@@ -7,10 +7,9 @@ import (
 
 	tls "github.com/refraction-networking/utls"
 
-	"github.com/golang/mock/gomock"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 )
 
 func TestHandshake(t *testing.T) {

@@ -82,7 +82,7 @@ var newUClientConnection = func(
 	}
 
 	s.mtuDiscoverer = newMTUDiscoverer(s.rttStats, getMaxPacketSize(s.conn.RemoteAddr()), s.sentPacketHandler.SetMaxDatagramSize)
-	oneRTTStream := newCryptoStream()
+	oneRTTStream := newCryptoStream(true)
 
 	var params *wire.TransportParameters
 

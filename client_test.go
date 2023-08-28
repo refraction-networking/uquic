@@ -13,10 +13,9 @@ import (
 	"github.com/refraction-networking/uquic/internal/utils"
 	"github.com/refraction-networking/uquic/logging"
 
-	"github.com/golang/mock/gomock"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 )
 
 type nullMultiplexer struct{}

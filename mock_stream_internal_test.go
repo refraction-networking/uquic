@@ -9,7 +9,7 @@ import (
 	reflect "reflect"
 	time "time"
 
-	gomock "github.com/golang/mock/gomock"
+	gomock "go.uber.org/mock/gomock"
 	ackhandler "github.com/refraction-networking/uquic/internal/ackhandler"
 	protocol "github.com/refraction-networking/uquic/internal/protocol"
 	qerr "github.com/refraction-networking/uquic/internal/qerr"

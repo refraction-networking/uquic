@@ -9,9 +9,9 @@ import (
 	reflect "reflect"
 	time "time"
 
-	gomock "github.com/golang/mock/gomock"
 	protocol "github.com/refraction-networking/uquic/internal/protocol"
 	qerr "github.com/refraction-networking/uquic/internal/qerr"
+	gomock "go.uber.org/mock/gomock"
 )
 
 // MockStream is a mock of Stream interface.

@@ -8,10 +8,10 @@ import (
 	net "net"
 	reflect "reflect"
 
-	gomock "github.com/golang/mock/gomock"
 	protocol "github.com/refraction-networking/uquic/internal/protocol"
 	wire "github.com/refraction-networking/uquic/internal/wire"
 	logging "github.com/refraction-networking/uquic/logging"
+	gomock "go.uber.org/mock/gomock"
 )
 
 // MockTracer is a mock of Tracer interface.

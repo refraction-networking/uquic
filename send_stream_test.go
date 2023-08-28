@@ -11,7 +11,6 @@ import (
 
 	"golang.org/x/exp/rand"
 
-	"github.com/golang/mock/gomock"
 	"github.com/refraction-networking/uquic/internal/ackhandler"
 	"github.com/refraction-networking/uquic/internal/mocks"
 	"github.com/refraction-networking/uquic/internal/protocol"
@@ -20,6 +19,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gbytes"
+	"go.uber.org/mock/gomock"
 )
 
 var _ = Describe("Send Stream", func() {
