@@ -75,7 +75,7 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 				CompressionMethods: []uint8{
 					0x0, // no compression
 				},
-				Extensions: ShuffleTLSExtensions([]tls.TLSExtension{
+				Extensions: tls.ShuffleChromeTLSExtensions([]tls.TLSExtension{
 					ShuffleQUICTransportParameters(&tls.QUICTransportParametersExtension{ // Order of QTPs are always shuffled
 						TransportParameters: tls.TransportParameters{
 							tls.InitialMaxStreamsUni(103),
@@ -192,7 +192,7 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 				CompressionMethods: []uint8{
 					0x0,
 				},
-				Extensions: ShuffleTLSExtensions([]tls.TLSExtension{
+				Extensions: tls.ShuffleChromeTLSExtensions([]tls.TLSExtension{
 					ShuffleQUICTransportParameters(&tls.QUICTransportParametersExtension{ // Order of QTPs are always shuffled
 						TransportParameters: tls.TransportParameters{
 							tls.InitialMaxStreamsUni(103),

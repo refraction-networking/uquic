@@ -168,7 +168,12 @@ func findExtraData(extras [][]byte) []byte {
 	return nil
 }
 
-func SendSessionTicket(c *QUICConn, allow0RTT bool) error {
+type QUICConnOrUQUICConn interface {
+	*QUICConn | *UQUICConn
+	SendSessionTicket(opts QUICSessionTicketOptions) error
+}
+
+func SendSessionTicket[C QUICConnOrUQUICConn](c C, allow0RTT bool) error {
 	return c.SendSessionTicket(tls.QUICSessionTicketOptions{
 		EarlyData: allow0RTT,
 	})

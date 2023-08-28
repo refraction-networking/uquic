@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -285,10 +286,15 @@ func (h *uCryptoSetup) handleDataFromSessionStateImpl(data []byte) (*wire.Transp
 // Due to limitations in crypto/tls, it's only possible to generate a single session ticket per connection.
 // It is only valid for the server.
 func (h *uCryptoSetup) GetSessionTicket() ([]byte, error) {
-	if h.tlsConf.SessionTicketsDisabled {
-		return nil, nil
-	}
-	if err := h.conn.SendSessionTicket(h.allow0RTT); err != nil {
+	if err := qtls.SendSessionTicket(h.conn, h.allow0RTT); err != nil {
+		// Session tickets might be disabled by tls.Config.SessionTicketsDisabled.
+		// We can't check h.tlsConfig here, since the actual config might have been obtained from
+		// the GetConfigForClient callback.
+		// See https://github.com/golang/go/issues/62032.
+		// Once that issue is resolved, this error assertion can be removed.
+		if strings.Contains(err.Error(), "session ticket keys unavailable") {
+			return nil, nil
+		}
 		return nil, err
 	}
 	ev := h.conn.NextEvent()

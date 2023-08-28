@@ -450,6 +450,12 @@ func (p *TransportParameters) marshalVarintParam(b []byte, id transportParameter
 // Since the session ticket is encrypted, the serialization format is defined by the server.
 // For convenience, we use the same format that we also use for sending the transport parameters.
 func (p *TransportParameters) MarshalForSessionTicket(b []byte) []byte {
+	// [UQUIC]
+	if p.ClientOverride != nil {
+		return p.ClientOverride.Marshal() // TODO: does this work as expected? test needed
+	}
+	// [/UQUIC]
+
 	b = quicvarint.Append(b, transportParameterMarshalingVersion)
 
 	// initial_max_stream_data_bidi_local
