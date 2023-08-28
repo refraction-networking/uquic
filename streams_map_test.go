@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/golang/mock/gomock"
-
 	"github.com/refraction-networking/uquic/internal/flowcontrol"
 	"github.com/refraction-networking/uquic/internal/mocks"
 	"github.com/refraction-networking/uquic/internal/protocol"
@@ -16,6 +14,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 )
 
 func (e streamError) TestError() error {

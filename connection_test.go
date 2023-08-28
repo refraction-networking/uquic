@@ -26,10 +26,9 @@ import (
 	"github.com/refraction-networking/uquic/internal/wire"
 	"github.com/refraction-networking/uquic/logging"
 
-	"github.com/golang/mock/gomock"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 )
 
 func areConnsRunning() bool {
@@ -2703,8 +2702,9 @@ var _ = Describe("Client Connection", func() {
 			Expect(recreateErr.nextPacketNumber).To(Equal(protocol.PacketNumber(128)))
 		})
 
-		It("it closes when no matching version is found", func() {
+		It("closes when no matching version is found", func() {
 			errChan := make(chan error, 1)
+			packer.EXPECT().PackCoalescedPacket(gomock.Any(), gomock.Any(), gomock.Any()).MaxTimes(1)
 			go func() {
 				defer GinkgoRecover()
 				cryptoSetup.EXPECT().StartHandshake().MaxTimes(1)
@@ -2712,7 +2712,6 @@ var _ = Describe("Client Connection", func() {
 				errChan <- conn.run()
 			}()
 			connRunner.EXPECT().Remove(srcConnID).MaxTimes(1)
-			packer.EXPECT().PackCoalescedPacket(gomock.Any(), gomock.Any(), gomock.Any()).MaxTimes(1)
 			gomock.InOrder(
 				tracer.EXPECT().ReceivedVersionNegotiationPacket(gomock.Any(), gomock.Any(), gomock.Any()),
 				tracer.EXPECT().ClosedConnection(gomock.Any()).Do(func(e error) {

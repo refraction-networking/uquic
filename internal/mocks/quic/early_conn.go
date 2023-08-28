@@ -9,9 +9,9 @@ import (
 	net "net"
 	reflect "reflect"
 
-	gomock "github.com/golang/mock/gomock"
 	quic "github.com/refraction-networking/uquic"
 	qerr "github.com/refraction-networking/uquic/internal/qerr"
+	gomock "go.uber.org/mock/gomock"
 )
 
 // MockEarlyConnection is a mock of EarlyConnection interface.

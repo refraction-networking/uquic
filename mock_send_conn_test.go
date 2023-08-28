@@ -8,7 +8,7 @@ import (
 	net "net"
 	reflect "reflect"
 
-	gomock "github.com/golang/mock/gomock"
+	gomock "go.uber.org/mock/gomock"
 	protocol "github.com/refraction-networking/uquic/internal/protocol"
 )
 

@@ -10,13 +10,14 @@ import (
 )
 
 type (
-	QUICConn            = tls.QUICConn
-	UQUICConn           = tls.UQUICConn // [UQUIC]
-	QUICConfig          = tls.QUICConfig
-	QUICEvent           = tls.QUICEvent
-	QUICEventKind       = tls.QUICEventKind
-	QUICEncryptionLevel = tls.QUICEncryptionLevel
-	AlertError          = tls.AlertError
+	QUICConn                 = tls.QUICConn
+	UQUICConn                = tls.UQUICConn // [UQUIC]
+	QUICConfig               = tls.QUICConfig
+	QUICEvent                = tls.QUICEvent
+	QUICEventKind            = tls.QUICEventKind
+	QUICEncryptionLevel      = tls.QUICEncryptionLevel
+	QUICSessionTicketOptions = tls.QUICSessionTicketOptions
+	AlertError               = tls.AlertError
 )
 
 const (
@@ -165,4 +166,10 @@ func findExtraData(extras [][]byte) []byte {
 		return extra[len(prefix):]
 	}
 	return nil
+}
+
+func SendSessionTicket(c *QUICConn, allow0RTT bool) error {
+	return c.SendSessionTicket(tls.QUICSessionTicketOptions{
+		EarlyData: allow0RTT,
+	})
 }
