@@ -3,10 +3,9 @@ package http3
 import (
 	"errors"
 
-	"github.com/quic-go/quic-go"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	quic "github.com/refraction-networking/uquic"
 )
 
 var _ = Describe("HTTP/3 errors", func() {
