@@ -12,6 +12,7 @@ import (
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/qerr"
 	"github.com/refraction-networking/uquic/internal/utils"
+	"github.com/refraction-networking/uquic/logging"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -63,7 +64,8 @@ var _ = Describe("Updatable AEAD", func() {
 					)
 
 					BeforeEach(func() {
-						serverTracer = mocklogging.NewMockConnectionTracer(mockCtrl)
+						var tr *logging.ConnectionTracer
+						tr, serverTracer = mocklogging.NewMockConnectionTracer(mockCtrl)
 						trafficSecret1 := make([]byte, 16)
 						trafficSecret2 := make([]byte, 16)
 						rand.Read(trafficSecret1)
@@ -71,7 +73,7 @@ var _ = Describe("Updatable AEAD", func() {
 
 						rttStats = utils.NewRTTStats()
 						client = newUpdatableAEAD(rttStats, nil, utils.DefaultLogger, v)
-						server = newUpdatableAEAD(rttStats, serverTracer, utils.DefaultLogger, v)
+						server = newUpdatableAEAD(rttStats, tr, utils.DefaultLogger, v)
 						client.SetReadKey(cs, trafficSecret2)
 						client.SetWriteKey(cs, trafficSecret1)
 						server.SetReadKey(cs, trafficSecret1)

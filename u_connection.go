@@ -24,7 +24,7 @@ var newUClientConnection = func(
 	initialPacketNumber protocol.PacketNumber,
 	enable0RTT bool,
 	hasNegotiatedVersion bool,
-	tracer logging.ConnectionTracer,
+	tracer *logging.ConnectionTracer,
 	tracingID uint64,
 	logger utils.Logger,
 	v protocol.VersionNumber,
@@ -67,11 +67,12 @@ var newUClientConnection = func(
 	)
 	s.preSetup()
 	s.ctx, s.ctxCancel = context.WithCancelCause(context.WithValue(context.Background(), ConnectionTracingKey, tracingID))
-	s.sentPacketHandler, s.receivedPacketHandler = ackhandler.NewUAckHandler( // [UQUIC]
+	s.sentPacketHandler, s.receivedPacketHandler = ackhandler.NewUAckHandler(
 		initialPacketNumber,
 		getMaxPacketSize(s.conn.RemoteAddr()),
 		s.rttStats,
-		false, /* has no effect */
+		false, // has no effect
+		s.conn.capabilities().ECN,
 		s.perspective,
 		s.tracer,
 		s.logger,
@@ -82,7 +83,7 @@ var newUClientConnection = func(
 	}
 
 	s.mtuDiscoverer = newMTUDiscoverer(s.rttStats, getMaxPacketSize(s.conn.RemoteAddr()), s.sentPacketHandler.SetMaxDatagramSize)
-	oneRTTStream := newCryptoStream(true)
+	oneRTTStream := newCryptoStream()
 
 	var params *wire.TransportParameters
 
@@ -134,8 +135,7 @@ var newUClientConnection = func(
 			params.MaxDatagramFrameSize = protocol.InvalidByteCount
 		}
 	}
-
-	if s.tracer != nil {
+	if s.tracer != nil && s.tracer.SentTransportParameters != nil {
 		s.tracer.SentTransportParameters(params)
 	}
 	cs := handshake.NewUCryptoSetupClient(

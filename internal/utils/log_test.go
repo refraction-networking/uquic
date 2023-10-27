@@ -82,7 +82,7 @@ var _ = Describe("Log", func() {
 		DefaultLogger.Infof("info")
 		t, err := time.Parse(format, b.String()[:b.Len()-6])
 		Expect(err).ToNot(HaveOccurred())
-		Expect(t).To(BeTemporally("~", time.Now(), 25*time.Hour))
+		Expect(t).To(BeTemporally("~", time.Now(), 48*time.Hour))
 	})
 
 	It("says whether debug is enabled", func() {

@@ -127,11 +127,11 @@ var _ = Describe("Transport", func() {
 	It("drops unparseable QUIC packets", func() {
 		addr := &net.UDPAddr{IP: net.IPv4(9, 8, 7, 6), Port: 1234}
 		packetChan := make(chan packetToRead)
-		tracer := mocklogging.NewMockTracer(mockCtrl)
+		t, tracer := mocklogging.NewMockTracer(mockCtrl)
 		tr := &Transport{
 			Conn:               newMockPacketConn(packetChan),
 			ConnectionIDLength: 10,
-			Tracer:             tracer,
+			Tracer:             t,
 		}
 		tr.init(true)
 		dropped := make(chan struct{})
@@ -329,11 +329,9 @@ var _ = Describe("Transport", func() {
 	It("allows receiving non-QUIC packets", func() {
 		remoteAddr := &net.UDPAddr{IP: net.IPv4(9, 8, 7, 6), Port: 1234}
 		packetChan := make(chan packetToRead)
-		tracer := mocklogging.NewMockTracer(mockCtrl)
 		tr := &Transport{
 			Conn:               newMockPacketConn(packetChan),
 			ConnectionIDLength: 10,
-			Tracer:             tracer,
 		}
 		tr.init(true)
 		receivedPacketChan := make(chan []byte)
@@ -363,11 +361,11 @@ var _ = Describe("Transport", func() {
 	It("drops non-QUIC packet if the application doesn't process them quickly enough", func() {
 		remoteAddr := &net.UDPAddr{IP: net.IPv4(9, 8, 7, 6), Port: 1234}
 		packetChan := make(chan packetToRead)
-		tracer := mocklogging.NewMockTracer(mockCtrl)
+		t, tracer := mocklogging.NewMockTracer(mockCtrl)
 		tr := &Transport{
 			Conn:               newMockPacketConn(packetChan),
 			ConnectionIDLength: 10,
-			Tracer:             tracer,
+			Tracer:             t,
 		}
 		tr.init(true)
 

@@ -34,7 +34,7 @@ type uCryptoSetup struct {
 
 	rttStats *utils.RTTStats
 
-	tracer logging.ConnectionTracer
+	tracer *logging.ConnectionTracer
 	logger utils.Logger
 
 	perspective protocol.Perspective
@@ -69,7 +69,7 @@ func NewUCryptoSetupClient(
 	tlsConf *tls.Config,
 	enable0RTT bool,
 	rttStats *utils.RTTStats,
-	tracer logging.ConnectionTracer,
+	tracer *logging.ConnectionTracer,
 	logger utils.Logger,
 	version protocol.VersionNumber,
 	chs *tls.ClientHelloSpec,
@@ -100,7 +100,7 @@ func newUCryptoSetup(
 	connID protocol.ConnectionID,
 	tp *wire.TransportParameters,
 	rttStats *utils.RTTStats,
-	tracer logging.ConnectionTracer,
+	tracer *logging.ConnectionTracer,
 	logger utils.Logger,
 	perspective protocol.Perspective,
 	version protocol.VersionNumber,
