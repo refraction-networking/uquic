@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/refraction-networking/uquic"
+	quic "github.com/refraction-networking/uquic"
 	tls "github.com/refraction-networking/utls"
 
 	quicproxy "github.com/refraction-networking/uquic/integrationtests/tools/proxy"
@@ -562,7 +562,8 @@ var _ = Describe("0-RTT", func() {
 		tlsConf, clientConf := dialAndReceiveSessionTicket(nil)
 
 		// now close the listener and dial new connection with a different ALPN
-		clientConf.NextProtos = []string{"new-alpn"}
+		// clientConf.NextProtos = []string{"new-alpn"}
+		clientConf.NextProtos = append(clientConf.NextProtos, "new-alpn")
 		tlsConf.NextProtos = []string{"new-alpn"}
 		counter, tracer := newPacketTracer()
 		ln, err := quic.ListenAddrEarly(
