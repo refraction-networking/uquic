@@ -1,8 +1,9 @@
-package logging
+package logging_test
 
 import (
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/wire"
+	. "github.com/refraction-networking/uquic/logging"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

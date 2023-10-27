@@ -28,10 +28,10 @@ var _ = Describe("Send Queue", func() {
 
 	It("sends a packet", func() {
 		p := getPacket([]byte("foobar"))
-		q.Send(p, 10) // make sure the packet size is passed through to the conn
+		q.Send(p, 10, protocol.ECT1) // make sure the packet size is passed through to the conn
 
 		written := make(chan struct{})
-		c.EXPECT().Write([]byte("foobar"), protocol.ByteCount(10)).Do(func([]byte, protocol.ByteCount) { close(written) })
+		c.EXPECT().Write([]byte("foobar"), uint16(10), protocol.ECT1).Do(func([]byte, uint16, protocol.ECN) { close(written) })
 		done := make(chan struct{})
 		go func() {
 			defer GinkgoRecover()
@@ -47,19 +47,19 @@ var _ = Describe("Send Queue", func() {
 	It("panics when Send() is called although there's no space in the queue", func() {
 		for i := 0; i < sendQueueCapacity; i++ {
 			Expect(q.WouldBlock()).To(BeFalse())
-			q.Send(getPacket([]byte("foobar")), 6)
+			q.Send(getPacket([]byte("foobar")), 6, protocol.ECNNon)
 		}
 		Expect(q.WouldBlock()).To(BeTrue())
-		Expect(func() { q.Send(getPacket([]byte("raboof")), 6) }).To(Panic())
+		Expect(func() { q.Send(getPacket([]byte("raboof")), 6, protocol.ECNNon) }).To(Panic())
 	})
 
 	It("signals when sending is possible again", func() {
 		Expect(q.WouldBlock()).To(BeFalse())
-		q.Send(getPacket([]byte("foobar1")), 6)
+		q.Send(getPacket([]byte("foobar1")), 6, protocol.ECNNon)
 		Consistently(q.Available()).ShouldNot(Receive())
 
 		// now start sending out packets. This should free up queue space.
-		c.EXPECT().Write(gomock.Any(), gomock.Any()).MinTimes(1).MaxTimes(2)
+		c.EXPECT().Write(gomock.Any(), gomock.Any(), protocol.ECNNon).MinTimes(1).MaxTimes(2)
 		done := make(chan struct{})
 		go func() {
 			defer GinkgoRecover()
@@ -69,7 +69,7 @@ var _ = Describe("Send Queue", func() {
 
 		Eventually(q.Available()).Should(Receive())
 		Expect(q.WouldBlock()).To(BeFalse())
-		Expect(func() { q.Send(getPacket([]byte("foobar2")), 7) }).ToNot(Panic())
+		Expect(func() { q.Send(getPacket([]byte("foobar2")), 7, protocol.ECNNon) }).ToNot(Panic())
 
 		q.Close()
 		Eventually(done).Should(BeClosed())
@@ -79,7 +79,7 @@ var _ = Describe("Send Queue", func() {
 		write := make(chan struct{}, 1)
 		written := make(chan struct{}, 100)
 		// now start sending out packets. This should free up queue space.
-		c.EXPECT().Write(gomock.Any(), gomock.Any()).DoAndReturn(func([]byte, protocol.ByteCount) error {
+		c.EXPECT().Write(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func([]byte, uint16, protocol.ECN) error {
 			written <- struct{}{}
 			<-write
 			return nil
@@ -94,19 +94,19 @@ var _ = Describe("Send Queue", func() {
 			close(done)
 		}()
 
-		q.Send(getPacket([]byte("foobar")), 6)
+		q.Send(getPacket([]byte("foobar")), 6, protocol.ECNNon)
 		<-written
 
 		// now fill up the send queue
 		for i := 0; i < sendQueueCapacity; i++ {
 			Expect(q.WouldBlock()).To(BeFalse())
-			q.Send(getPacket([]byte("foobar")), 6)
+			q.Send(getPacket([]byte("foobar")), 6, protocol.ECNNon)
 		}
 		// One more packet is queued when it's picked up by Run and written to the connection.
 		// In this test, it's blocked on write channel in the mocked Write call.
 		<-written
 		Eventually(q.WouldBlock()).Should(BeFalse())
-		q.Send(getPacket([]byte("foobar")), 6)
+		q.Send(getPacket([]byte("foobar")), 6, protocol.ECNNon)
 
 		Expect(q.WouldBlock()).To(BeTrue())
 		Consistently(q.Available()).ShouldNot(Receive())
@@ -132,15 +132,15 @@ var _ = Describe("Send Queue", func() {
 
 		// the run loop exits if there is a write error
 		testErr := errors.New("test error")
-		c.EXPECT().Write(gomock.Any(), gomock.Any()).Return(testErr)
-		q.Send(getPacket([]byte("foobar")), 6)
+		c.EXPECT().Write(gomock.Any(), gomock.Any(), gomock.Any()).Return(testErr)
+		q.Send(getPacket([]byte("foobar")), 6, protocol.ECNNon)
 		Eventually(done).Should(BeClosed())
 
 		sent := make(chan struct{})
 		go func() {
 			defer GinkgoRecover()
-			q.Send(getPacket([]byte("raboof")), 6)
-			q.Send(getPacket([]byte("quux")), 4)
+			q.Send(getPacket([]byte("raboof")), 6, protocol.ECNNon)
+			q.Send(getPacket([]byte("quux")), 4, protocol.ECNNon)
 			close(sent)
 		}()
 
@@ -149,7 +149,7 @@ var _ = Describe("Send Queue", func() {
 
 	It("blocks Close() until the packet has been sent out", func() {
 		written := make(chan []byte)
-		c.EXPECT().Write(gomock.Any(), gomock.Any()).Do(func(p []byte, _ protocol.ByteCount) { written <- p })
+		c.EXPECT().Write(gomock.Any(), gomock.Any(), gomock.Any()).Do(func(p []byte, _ uint16, _ protocol.ECN) { written <- p })
 		done := make(chan struct{})
 		go func() {
 			defer GinkgoRecover()
@@ -157,7 +157,7 @@ var _ = Describe("Send Queue", func() {
 			close(done)
 		}()
 
-		q.Send(getPacket([]byte("foobar")), 6)
+		q.Send(getPacket([]byte("foobar")), 6, protocol.ECNNon)
 
 		closed := make(chan struct{})
 		go func() {

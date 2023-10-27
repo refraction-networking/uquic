@@ -18,6 +18,16 @@ import (
 	"go.uber.org/mock/gomock"
 )
 
+type oobRecordingConn struct {
+	*net.UDPConn
+	oobs [][]byte
+}
+
+func (c *oobRecordingConn) WriteMsgUDP(b, oob []byte, addr *net.UDPAddr) (n, oobn int, err error) {
+	c.oobs = append(c.oobs, oob)
+	return c.UDPConn.WriteMsgUDP(b, oob, addr)
+}
+
 var _ = Describe("OOB Conn Test", func() {
 	runServer := func(network, address string) (*net.UDPConn, <-chan receivedPacket) {
 		addr, err := net.ResolveUDPAddr(network, address)
@@ -43,7 +53,7 @@ var _ = Describe("OOB Conn Test", func() {
 		return udpConn, packetChan
 	}
 
-	Context("ECN conn", func() {
+	Context("reading ECN-marked packets", func() {
 		sendPacketWithECN := func(network string, addr *net.UDPAddr, setECN func(uintptr)) net.Addr {
 			conn, err := net.DialUDP(network, nil, addr)
 			ExpectWithOffset(1, err).ToNot(HaveOccurred())
@@ -128,6 +138,42 @@ var _ = Describe("OOB Conn Test", func() {
 			Eventually(packetChan).Should(Receive(&p))
 			Expect(utils.IsIPv4(p.remoteAddr.(*net.UDPAddr).IP)).To(BeFalse())
 			Expect(p.ecn).To(Equal(protocol.ECT1))
+		})
+
+		It("sends packets with ECN on IPv4", func() {
+			conn, packetChan := runServer("udp4", "localhost:0")
+			defer conn.Close()
+
+			c, err := net.ListenUDP("udp4", nil)
+			Expect(err).ToNot(HaveOccurred())
+			defer c.Close()
+
+			for _, val := range []protocol.ECN{protocol.ECNNon, protocol.ECT1, protocol.ECT0, protocol.ECNCE} {
+				_, _, err = c.WriteMsgUDP([]byte("foobar"), appendIPv4ECNMsg([]byte{}, val), conn.LocalAddr().(*net.UDPAddr))
+				Expect(err).ToNot(HaveOccurred())
+				var p receivedPacket
+				Eventually(packetChan).Should(Receive(&p))
+				Expect(p.data).To(Equal([]byte("foobar")))
+				Expect(p.ecn).To(Equal(val))
+			}
+		})
+
+		It("sends packets with ECN on IPv6", func() {
+			conn, packetChan := runServer("udp6", "[::1]:0")
+			defer conn.Close()
+
+			c, err := net.ListenUDP("udp6", nil)
+			Expect(err).ToNot(HaveOccurred())
+			defer c.Close()
+
+			for _, val := range []protocol.ECN{protocol.ECNNon, protocol.ECT1, protocol.ECT0, protocol.ECNCE} {
+				_, _, err = c.WriteMsgUDP([]byte("foobar"), appendIPv6ECNMsg([]byte{}, val), conn.LocalAddr().(*net.UDPAddr))
+				Expect(err).ToNot(HaveOccurred())
+				var p receivedPacket
+				Eventually(packetChan).Should(Receive(&p))
+				Expect(p.data).To(Equal([]byte("foobar")))
+				Expect(p.ecn).To(Equal(val))
+			}
 		})
 	})
 
@@ -242,4 +288,50 @@ var _ = Describe("OOB Conn Test", func() {
 			}
 		})
 	})
+
+	Context("sending ECN-marked packets", func() {
+		It("sets the ECN control message", func() {
+			addr, err := net.ResolveUDPAddr("udp", "localhost:0")
+			Expect(err).ToNot(HaveOccurred())
+			udpConn, err := net.ListenUDP("udp", addr)
+			Expect(err).ToNot(HaveOccurred())
+			c := &oobRecordingConn{UDPConn: udpConn}
+			oobConn, err := newConn(c, true)
+			Expect(err).ToNot(HaveOccurred())
+
+			oob := make([]byte, 0, 123)
+			oobConn.WritePacket([]byte("foobar"), addr, oob, 0, protocol.ECNCE)
+			Expect(c.oobs).To(HaveLen(1))
+			oobMsg := c.oobs[0]
+			Expect(oobMsg).ToNot(BeEmpty())
+			Expect(oobMsg).To(HaveCap(cap(oob))) // check that it appended to oob
+			expected := appendIPv4ECNMsg([]byte{}, protocol.ECNCE)
+			Expect(oobMsg).To(Equal(expected))
+		})
+	})
+
+	if platformSupportsGSO {
+		Context("GSO", func() {
+			It("appends the GSO control message", func() {
+				addr, err := net.ResolveUDPAddr("udp", "localhost:0")
+				Expect(err).ToNot(HaveOccurred())
+				udpConn, err := net.ListenUDP("udp", addr)
+				Expect(err).ToNot(HaveOccurred())
+				c := &oobRecordingConn{UDPConn: udpConn}
+				oobConn, err := newConn(c, true)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(oobConn.capabilities().GSO).To(BeTrue())
+
+				oob := make([]byte, 0, 123)
+				oobConn.WritePacket([]byte("foobar"), addr, oob, 3, protocol.ECNCE)
+				Expect(c.oobs).To(HaveLen(1))
+				oobMsg := c.oobs[0]
+				Expect(oobMsg).ToNot(BeEmpty())
+				Expect(oobMsg).To(HaveCap(cap(oob))) // check that it appended to oob
+				expected := appendUDPSegmentSizeMsg([]byte{}, 3)
+				// Check that the first control message is the OOB control message.
+				Expect(oobMsg[:len(expected)]).To(Equal(expected))
+			})
+		})
+	}
 })

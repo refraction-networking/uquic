@@ -35,7 +35,7 @@ type client struct {
 
 	conn quicConn
 
-	tracer    logging.ConnectionTracer
+	tracer    *logging.ConnectionTracer
 	tracingID uint64
 	logger    utils.Logger
 }
@@ -155,7 +155,7 @@ func dial(
 	if c.config.Tracer != nil {
 		c.tracer = c.config.Tracer(context.WithValue(ctx, ConnectionTracingKey, c.tracingID), protocol.PerspectiveClient, c.destConnID)
 	}
-	if c.tracer != nil {
+	if c.tracer != nil && c.tracer.StartedConnection != nil {
 		c.tracer.StartedConnection(c.sendConn.LocalAddr(), c.sendConn.RemoteAddr(), c.srcConnID, c.destConnID)
 	}
 
@@ -238,7 +238,7 @@ func (c *client) dial(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		c.conn.shutdown()
-		return ctx.Err()
+		return context.Cause(ctx)
 	case err := <-errorChan:
 		return err
 	case recreateErr := <-recreateChan:
