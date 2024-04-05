@@ -1,6 +1,6 @@
 module github.com/refraction-networking/uquic
 
-go 1.20
+go 1.21
 
 require (
 	github.com/francoispqt/gojay v1.2.13
@@ -9,7 +9,7 @@ require (
 	github.com/onsi/gomega v1.29.0
 	github.com/quic-go/qpack v0.4.0
 	github.com/refraction-networking/utls v1.5.4
-	go.uber.org/mock v0.3.0
+	go.uber.org/mock v0.4.0
 	golang.org/x/crypto v0.17.0
 	golang.org/x/exp v0.0.0-20231006140011-7918f672742d
 	golang.org/x/net v0.17.0
@@ -27,7 +27,7 @@ require (
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/google/pprof v0.0.0-20231023181126-ff6d637d2a7b // indirect
 	github.com/klauspost/compress v1.17.2 // indirect
-	github.com/quic-go/quic-go v0.39.4 // indirect
+	github.com/quic-go/quic-go v0.42.0 // indirect
 	golang.org/x/mod v0.13.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/tools v0.14.0 // indirect
