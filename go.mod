@@ -1,6 +1,6 @@
 module github.com/refraction-networking/uquic
 
-go 1.20
+go 1.21
 
 require (
 	github.com/francoispqt/gojay v1.2.13
