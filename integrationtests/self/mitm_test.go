@@ -15,8 +15,8 @@ import (
 	quic "github.com/refraction-networking/uquic"
 	quicproxy "github.com/refraction-networking/uquic/integrationtests/tools/proxy"
 	"github.com/refraction-networking/uquic/internal/protocol"
-	"github.com/refraction-networking/uquic/internal/testutils"
 	"github.com/refraction-networking/uquic/internal/wire"
+	"github.com/refraction-networking/uquic/testutils"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -32,7 +32,7 @@ var _ = Describe("MITM test", func() {
 		serverConfig                     *quic.Config
 	)
 
-	startServerAndProxy := func(delayCb quicproxy.DelayCallback, dropCb quicproxy.DropCallback) (proxyPort int, closeFn func()) {
+	startServerAndProxy := func(delayCb quicproxy.DelayCallback, dropCb quicproxy.DropCallback, forceAddressValidation bool) (proxyPort int, closeFn func()) {
 		addr, err := net.ResolveUDPAddr("udp", "localhost:0")
 		Expect(err).ToNot(HaveOccurred())
 		c, err := net.ListenUDP("udp", addr)
@@ -40,6 +40,10 @@ var _ = Describe("MITM test", func() {
 		serverTransport = &quic.Transport{
 			Conn:               c,
 			ConnectionIDLength: connIDLen,
+		}
+		addTracer(serverTransport)
+		if forceAddressValidation {
+			serverTransport.VerifySourceAddress = func(net.Addr) bool { return true }
 		}
 		ln, err := serverTransport.Listen(getTLSConfig(), serverConfig)
 		Expect(err).ToNot(HaveOccurred())
@@ -83,6 +87,7 @@ var _ = Describe("MITM test", func() {
 			Conn:               clientUDPConn,
 			ConnectionIDLength: connIDLen,
 		}
+		addTracer(clientTransport)
 	})
 
 	Context("unsuccessful attacks", func() {
@@ -153,7 +158,7 @@ var _ = Describe("MITM test", func() {
 			}
 
 			runTest := func(delayCb quicproxy.DelayCallback) {
-				proxyPort, closeFn := startServerAndProxy(delayCb, nil)
+				proxyPort, closeFn := startServerAndProxy(delayCb, nil, false)
 				defer closeFn()
 				raddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("localhost:%d", proxyPort))
 				Expect(err).ToNot(HaveOccurred())
@@ -196,7 +201,7 @@ var _ = Describe("MITM test", func() {
 		})
 
 		runTest := func(dropCb quicproxy.DropCallback) {
-			proxyPort, closeFn := startServerAndProxy(nil, dropCb)
+			proxyPort, closeFn := startServerAndProxy(nil, dropCb, false)
 			defer closeFn()
 			raddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("localhost:%d", proxyPort))
 			Expect(err).ToNot(HaveOccurred())
@@ -244,17 +249,17 @@ var _ = Describe("MITM test", func() {
 		Context("corrupting packets", func() {
 			const idleTimeout = time.Second
 
-			var numCorrupted, numPackets int32
+			var numCorrupted, numPackets atomic.Int32
 
 			BeforeEach(func() {
-				numCorrupted = 0
-				numPackets = 0
+				numCorrupted.Store(0)
+				numPackets.Store(0)
 				serverConfig.MaxIdleTimeout = idleTimeout
 			})
 
 			AfterEach(func() {
-				num := atomic.LoadInt32(&numCorrupted)
-				fmt.Fprintf(GinkgoWriter, "Corrupted %d of %d packets.", num, atomic.LoadInt32(&numPackets))
+				num := numCorrupted.Load()
+				fmt.Fprintf(GinkgoWriter, "Corrupted %d of %d packets.", num, numPackets.Load())
 				Expect(num).To(BeNumerically(">=", 1))
 				// If the packet containing the CONNECTION_CLOSE is corrupted,
 				// we have to wait for the connection to time out.
@@ -266,13 +271,13 @@ var _ = Describe("MITM test", func() {
 				dropCb := func(dir quicproxy.Direction, raw []byte) bool {
 					defer GinkgoRecover()
 					if dir == quicproxy.DirectionIncoming {
-						atomic.AddInt32(&numPackets, 1)
+						numPackets.Add(1)
 						if rand.Intn(interval) == 0 {
 							pos := rand.Intn(len(raw))
 							raw[pos] = byte(rand.Intn(256))
 							_, err := clientTransport.WriteTo(raw, serverTransport.Conn.LocalAddr())
 							Expect(err).ToNot(HaveOccurred())
-							atomic.AddInt32(&numCorrupted, 1)
+							numCorrupted.Add(1)
 							return true
 						}
 					}
@@ -286,13 +291,13 @@ var _ = Describe("MITM test", func() {
 				dropCb := func(dir quicproxy.Direction, raw []byte) bool {
 					defer GinkgoRecover()
 					if dir == quicproxy.DirectionOutgoing {
-						atomic.AddInt32(&numPackets, 1)
+						numPackets.Add(1)
 						if rand.Intn(interval) == 0 {
 							pos := rand.Intn(len(raw))
 							raw[pos] = byte(rand.Intn(256))
 							_, err := serverTransport.WriteTo(raw, clientTransport.Conn.LocalAddr())
 							Expect(err).ToNot(HaveOccurred())
-							atomic.AddInt32(&numCorrupted, 1)
+							numCorrupted.Add(1)
 							return true
 						}
 					}
@@ -310,17 +315,16 @@ var _ = Describe("MITM test", func() {
 
 		const rtt = 20 * time.Millisecond
 
-		runTest := func(delayCb quicproxy.DelayCallback) (closeFn func(), err error) {
-			proxyPort, serverCloseFn := startServerAndProxy(delayCb, nil)
+		runTest := func(proxyPort int) (closeFn func(), err error) {
 			raddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("localhost:%d", proxyPort))
 			Expect(err).ToNot(HaveOccurred())
 			_, err = clientTransport.Dial(
 				context.Background(),
 				raddr,
 				getTLSClientConfig(),
-				getQuicConfig(&quic.Config{HandshakeIdleTimeout: 2 * time.Second}),
+				getQuicConfig(&quic.Config{HandshakeIdleTimeout: scaleDuration(200 * time.Millisecond)}),
 			)
-			return func() { clientTransport.Close(); serverCloseFn() }, err
+			return func() { clientTransport.Close() }, err
 		}
 
 		// fails immediately because client connection closes when it can't find compatible version
@@ -338,7 +342,7 @@ var _ = Describe("MITM test", func() {
 					}
 
 					// Create fake version negotiation packet with no supported versions
-					versions := []protocol.VersionNumber{}
+					versions := []protocol.Version{}
 					packet := wire.ComposeVersionNegotiation(
 						protocol.ArbitraryLenConnectionID(hdr.SrcConnectionID.Bytes()),
 						protocol.ArbitraryLenConnectionID(hdr.DestConnectionID.Bytes()),
@@ -352,7 +356,9 @@ var _ = Describe("MITM test", func() {
 				}
 				return rtt / 2
 			}
-			closeFn, err := runTest(delayCb)
+			proxyPort, serverCloseFn := startServerAndProxy(delayCb, nil, false)
+			defer serverCloseFn()
+			closeFn, err := runTest(proxyPort)
 			defer closeFn()
 			Expect(err).To(HaveOccurred())
 			vnErr := &quic.VersionNegotiationError{}
@@ -363,8 +369,7 @@ var _ = Describe("MITM test", func() {
 		// times out, because client doesn't accept subsequent real retry packets from server
 		// as it has already accepted a retry.
 		// TODO: determine behavior when server does not send Retry packets
-		It("fails when a forged Retry packet with modified srcConnID is sent to client", func() {
-			serverConfig.RequireAddressValidation = func(net.Addr) bool { return true }
+		It("fails when a forged Retry packet with modified Source Connection ID is sent to client", func() {
 			var initialPacketIntercepted bool
 			done := make(chan struct{})
 			delayCb := func(dir quicproxy.Direction, raw []byte) time.Duration {
@@ -388,7 +393,9 @@ var _ = Describe("MITM test", func() {
 				}
 				return rtt / 2
 			}
-			closeFn, err := runTest(delayCb)
+			proxyPort, serverCloseFn := startServerAndProxy(delayCb, nil, true)
+			defer serverCloseFn()
+			closeFn, err := runTest(proxyPort)
 			defer closeFn()
 			Expect(err).To(HaveOccurred())
 			Expect(err.(net.Error).Timeout()).To(BeTrue())
@@ -412,13 +419,15 @@ var _ = Describe("MITM test", func() {
 					}
 					defer close(done)
 					injected = true
-					initialPacket := testutils.ComposeInitialPacket(hdr.DestConnectionID, hdr.SrcConnectionID, hdr.Version, hdr.DestConnectionID, nil)
+					initialPacket := testutils.ComposeInitialPacket(hdr.DestConnectionID, hdr.SrcConnectionID, hdr.DestConnectionID, nil, protocol.PerspectiveServer, hdr.Version)
 					_, err = serverTransport.WriteTo(initialPacket, clientTransport.Conn.LocalAddr())
 					Expect(err).ToNot(HaveOccurred())
 				}
 				return rtt
 			}
-			closeFn, err := runTest(delayCb)
+			proxyPort, serverCloseFn := startServerAndProxy(delayCb, nil, false)
+			defer serverCloseFn()
+			closeFn, err := runTest(proxyPort)
 			defer closeFn()
 			Expect(err).To(HaveOccurred())
 			Expect(err.(net.Error).Timeout()).To(BeTrue())
@@ -442,13 +451,15 @@ var _ = Describe("MITM test", func() {
 					injected = true
 					// Fake Initial with ACK for packet 2 (unsent)
 					ack := &wire.AckFrame{AckRanges: []wire.AckRange{{Smallest: 2, Largest: 2}}}
-					initialPacket := testutils.ComposeInitialPacket(hdr.DestConnectionID, hdr.SrcConnectionID, hdr.Version, hdr.DestConnectionID, []wire.Frame{ack})
+					initialPacket := testutils.ComposeInitialPacket(hdr.DestConnectionID, hdr.SrcConnectionID, hdr.DestConnectionID, []wire.Frame{ack}, protocol.PerspectiveServer, hdr.Version)
 					_, err = serverTransport.WriteTo(initialPacket, clientTransport.Conn.LocalAddr())
 					Expect(err).ToNot(HaveOccurred())
 				}
 				return rtt
 			}
-			closeFn, err := runTest(delayCb)
+			proxyPort, serverCloseFn := startServerAndProxy(delayCb, nil, false)
+			defer serverCloseFn()
+			closeFn, err := runTest(proxyPort)
 			defer closeFn()
 			Expect(err).To(HaveOccurred())
 			var transportErr *quic.TransportError

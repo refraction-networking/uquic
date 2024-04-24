@@ -115,13 +115,33 @@ var _ = Describe("Transport", func() {
 		phm := NewMockPacketHandlerManager(mockCtrl)
 		tr.handlerMap = phm
 
-		phm.EXPECT().CloseServer()
 		Expect(ln.Close()).To(Succeed())
 
 		// shutdown
 		phm.EXPECT().Close(gomock.Any())
 		close(packetChan)
 		tr.Close()
+	})
+
+	It("closes transport concurrently with listener", func() {
+		// try 10 times to trigger race conditions
+		for i := 0; i < 10; i++ {
+			packetChan := make(chan packetToRead)
+			tr := &Transport{Conn: newMockPacketConn(packetChan)}
+			ln, err := tr.Listen(&tls.Config{}, nil)
+			Expect(err).ToNot(HaveOccurred())
+			ch := make(chan bool)
+			// Close transport and listener concurrently.
+			go func() {
+				ch <- true
+				Expect(ln.Close()).To(Succeed())
+				ch <- true
+			}()
+			<-ch
+			close(packetChan)
+			Expect(tr.Close()).To(Succeed())
+			<-ch
+		}
 	})
 
 	It("drops unparseable QUIC packets", func() {
@@ -143,6 +163,7 @@ var _ = Describe("Transport", func() {
 		Eventually(dropped).Should(BeClosed())
 
 		// shutdown
+		tracer.EXPECT().Close()
 		close(packetChan)
 		tr.Close()
 	})
@@ -206,7 +227,6 @@ var _ = Describe("Transport", func() {
 		b = append(b, token[:]...)
 		conn := NewMockPacketHandler(mockCtrl)
 		gomock.InOrder(
-			phm.EXPECT().GetByResetToken(token),
 			phm.EXPECT().Get(connID).Return(conn, true),
 			conn.EXPECT().handlePacket(gomock.Any()).Do(func(p receivedPacket) {
 				Expect(p.data).To(Equal(b))
@@ -224,7 +244,10 @@ var _ = Describe("Transport", func() {
 	It("handles stateless resets", func() {
 		connID := protocol.ParseConnectionID([]byte{2, 3, 4, 5})
 		packetChan := make(chan packetToRead)
-		tr := Transport{Conn: newMockPacketConn(packetChan)}
+		tr := Transport{
+			Conn:               newMockPacketConn(packetChan),
+			ConnectionIDLength: connID.Len(),
+		}
 		tr.init(true)
 		defer tr.Close()
 		phm := NewMockPacketHandlerManager(mockCtrl)
@@ -240,6 +263,7 @@ var _ = Describe("Transport", func() {
 		conn := NewMockPacketHandler(mockCtrl)
 		destroyed := make(chan struct{})
 		gomock.InOrder(
+			phm.EXPECT().Get(connID),
 			phm.EXPECT().GetByResetToken(token).Return(conn, true),
 			conn.EXPECT().destroy(gomock.Any()).Do(func(err error) {
 				Expect(err).To(MatchError(&StatelessResetError{Token: token}))
@@ -278,12 +302,13 @@ var _ = Describe("Transport", func() {
 		rand.Read(token[:])
 		written := make(chan struct{})
 		gomock.InOrder(
-			phm.EXPECT().GetByResetToken(gomock.Any()),
 			phm.EXPECT().Get(connID),
+			phm.EXPECT().GetByResetToken(gomock.Any()),
 			phm.EXPECT().GetStatelessResetToken(connID).Return(token),
-			conn.EXPECT().WriteTo(gomock.Any(), gomock.Any()).Do(func(b []byte, _ net.Addr) {
+			conn.EXPECT().WriteTo(gomock.Any(), gomock.Any()).Do(func(b []byte, _ net.Addr) (int, error) {
 				defer close(written)
 				Expect(bytes.Contains(b, token[:])).To(BeTrue())
+				return len(b), nil
 			}),
 		)
 		packetChan <- packetToRead{data: b}
@@ -392,6 +417,7 @@ var _ = Describe("Transport", func() {
 		Eventually(done).Should(BeClosed())
 
 		// shutdown
+		tracer.EXPECT().Close()
 		close(packetChan)
 		tr.Close()
 	})
