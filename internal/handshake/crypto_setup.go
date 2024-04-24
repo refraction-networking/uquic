@@ -276,7 +276,6 @@ func (h *cryptoSetup) handleEvent(ev tls.QUICEvent) (done bool, err error) {
 		return false, h.handleTransportParameters(ev.Data)
 	case tls.QUICTransportParametersRequired:
 		h.conn.SetTransportParameters(h.ourParams.Marshal(h.perspective))
-		// [UQUIC] doesn't expect this and may fail
 		return false, nil
 	case tls.QUICRejectedEarlyData:
 		h.rejected0RTT()

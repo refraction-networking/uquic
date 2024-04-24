@@ -20,5 +20,5 @@ func NewUAckHandler(
 	sph := newSentPacketHandler(initialPacketNumber, initialMaxDatagramSize, rttStats, clientAddressValidated, enableECN, pers, tracer, logger)
 	return &uSentPacketHandler{
 		sentPacketHandler: sph,
-	}, newReceivedPacketHandler(sph, rttStats, logger)
+	}, newReceivedPacketHandler(sph, logger)
 }

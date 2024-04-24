@@ -9,15 +9,6 @@ import (
 	"github.com/refraction-networking/uquic/internal/protocol"
 )
 
-// [UQUIC]
-func UQUICClient(config *tls.QUICConfig, clientHelloSpec *tls.ClientHelloSpec) *UQUICConn {
-	uqc := tls.UQUICClient(config, tls.HelloCustom)
-	if err := uqc.ApplyPreset(clientHelloSpec); err != nil {
-		panic(err)
-	}
-	return uqc
-}
-
 func SetupConfigForServer(qconf *tls.QUICConfig, _ bool, getData func() []byte, handleSessionTicket func([]byte, bool) bool) {
 	conf := qconf.TLSConfig
 

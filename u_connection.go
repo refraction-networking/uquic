@@ -27,11 +27,7 @@ var newUClientConnection = func(
 	tracer *logging.ConnectionTracer,
 	tracingID uint64,
 	logger utils.Logger,
-	v protocol.VersionNumber,
-	// chs *tls.ClientHelloSpec,
-	// initPktNbrLen PacketNumberLen,
-	// qfs QUICFrames,
-	// udpDatagramMinSize int,
+	v protocol.Version,
 	uSpec *QUICSpec, // [UQUIC]
 ) quicConn {
 	s := &connection{
@@ -130,7 +126,7 @@ var newUClientConnection = func(
 			InitialSourceConnectionID: srcConnID,
 		}
 		if s.config.EnableDatagrams {
-			params.MaxDatagramFrameSize = protocol.MaxDatagramFrameSize
+			params.MaxDatagramFrameSize = wire.MaxDatagramSize
 		} else {
 			params.MaxDatagramFrameSize = protocol.InvalidByteCount
 		}

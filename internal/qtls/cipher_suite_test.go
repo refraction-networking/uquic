@@ -1,11 +1,11 @@
 package qtls
 
 import (
-	"crypto/tls"
 	"fmt"
 	"net"
 
-	"github.com/quic-go/quic-go/internal/testdata"
+	"github.com/refraction-networking/uquic/internal/testdata"
+	tls "github.com/refraction-networking/utls"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

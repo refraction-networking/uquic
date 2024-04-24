@@ -35,7 +35,7 @@ func newUPacketPacker(
 // PackCoalescedPacket packs a new packet.
 // It packs an Initial / Handshake if there is data to send in these packet number spaces.
 // It should only be called before the handshake is confirmed.
-func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxPacketSize protocol.ByteCount, v protocol.VersionNumber) (*coalescedPacket, error) {
+func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxPacketSize protocol.ByteCount, v protocol.Version) (*coalescedPacket, error) {
 	var (
 		initialHdr, handshakeHdr, zeroRTTHdr                            *wire.ExtendedHeader
 		initialPayload, handshakePayload, zeroRTTPayload, oneRTTPayload payload
@@ -165,7 +165,7 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxPacketSize protocol
 }
 
 // [UQUIC]
-func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.ExtendedHeader, pl payload, encLevel protocol.EncryptionLevel, sealer sealer, v protocol.VersionNumber) (*longHeaderPacket, error) {
+func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.ExtendedHeader, pl payload, encLevel protocol.EncryptionLevel, sealer sealer, v protocol.Version) (*longHeaderPacket, error) {
 	// Shouldn't need this?
 	// if p.uSpec.InitialPacketSpec.InitPacketNumberLength > 0 {
 	// 	header.PacketNumberLen = p.uSpec.InitialPacketSpec.InitPacketNumberLength
@@ -220,7 +220,7 @@ func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.E
 	}, nil
 }
 
-func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.VersionNumber) ([]byte, error) {
+func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.Version) ([]byte, error) {
 	var originalFrameBytes []byte
 
 	for _, f := range pl.frames {
