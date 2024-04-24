@@ -155,7 +155,7 @@ func (h *connIDManager) updateConnectionID() {
 	h.queueControlFrame(&wire.RetireConnectionIDFrame{
 		SequenceNumber: h.activeSequenceNumber,
 	})
-	h.highestRetired = utils.Max(h.highestRetired, h.activeSequenceNumber)
+	h.highestRetired = max(h.highestRetired, h.activeSequenceNumber)
 	if h.activeStatelessResetToken != nil {
 		h.removeStatelessResetToken(*h.activeStatelessResetToken)
 	}

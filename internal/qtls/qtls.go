@@ -9,45 +9,8 @@ import (
 	"github.com/refraction-networking/uquic/internal/protocol"
 )
 
-type (
-	QUICConn                 = tls.QUICConn
-	UQUICConn                = tls.UQUICConn // [UQUIC]
-	QUICConfig               = tls.QUICConfig
-	QUICEvent                = tls.QUICEvent
-	QUICEventKind            = tls.QUICEventKind
-	QUICEncryptionLevel      = tls.QUICEncryptionLevel
-	QUICSessionTicketOptions = tls.QUICSessionTicketOptions
-	AlertError               = tls.AlertError
-)
-
-const (
-	QUICEncryptionLevelInitial     = tls.QUICEncryptionLevelInitial
-	QUICEncryptionLevelEarly       = tls.QUICEncryptionLevelEarly
-	QUICEncryptionLevelHandshake   = tls.QUICEncryptionLevelHandshake
-	QUICEncryptionLevelApplication = tls.QUICEncryptionLevelApplication
-)
-
-const (
-	QUICNoEvent                     = tls.QUICNoEvent
-	QUICSetReadSecret               = tls.QUICSetReadSecret
-	QUICSetWriteSecret              = tls.QUICSetWriteSecret
-	QUICWriteData                   = tls.QUICWriteData
-	QUICTransportParameters         = tls.QUICTransportParameters
-	QUICTransportParametersRequired = tls.QUICTransportParametersRequired
-	QUICRejectedEarlyData           = tls.QUICRejectedEarlyData
-	QUICHandshakeDone               = tls.QUICHandshakeDone
-)
-
-func QUICServer(config *QUICConfig) *QUICConn {
-	return tls.QUICServer(config)
-}
-
-func QUICClient(config *QUICConfig) *QUICConn {
-	return tls.QUICClient(config)
-}
-
 // [UQUIC]
-func UQUICClient(config *QUICConfig, clientHelloSpec *tls.ClientHelloSpec) *UQUICConn {
+func UQUICClient(config *tls.QUICConfig, clientHelloSpec *tls.ClientHelloSpec) *UQUICConn {
 	uqc := tls.UQUICClient(config, tls.HelloCustom)
 	if err := uqc.ApplyPreset(clientHelloSpec); err != nil {
 		panic(err)
@@ -55,7 +18,7 @@ func UQUICClient(config *QUICConfig, clientHelloSpec *tls.ClientHelloSpec) *UQUI
 	return uqc
 }
 
-func SetupConfigForServer(qconf *QUICConfig, _ bool, getData func() []byte, handleSessionTicket func([]byte, bool) bool) {
+func SetupConfigForServer(qconf *tls.QUICConfig, _ bool, getData func() []byte, handleSessionTicket func([]byte, bool) bool) {
 	conf := qconf.TLSConfig
 
 	// Workaround for https://github.com/golang/go/issues/60506.
@@ -107,7 +70,11 @@ func SetupConfigForServer(qconf *QUICConfig, _ bool, getData func() []byte, hand
 	}
 }
 
-func SetupConfigForClient(qconf *QUICConfig, getData func() []byte, setData func([]byte)) {
+func SetupConfigForClient(
+	qconf *tls.QUICConfig,
+	getData func(earlyData bool) []byte,
+	setData func(data []byte, earlyData bool) (allowEarlyData bool),
+) {
 	conf := qconf.TLSConfig
 	if conf.ClientSessionCache != nil {
 		origCache := conf.ClientSessionCache
@@ -164,15 +131,4 @@ func findExtraData(extras [][]byte) []byte {
 		return extra[len(prefix):]
 	}
 	return nil
-}
-
-type QUICConnOrUQUICConn interface {
-	*QUICConn | *UQUICConn
-	SendSessionTicket(opts QUICSessionTicketOptions) error
-}
-
-func SendSessionTicket[C QUICConnOrUQUICConn](c C, allow0RTT bool) error {
-	return c.SendSessionTicket(tls.QUICSessionTicketOptions{
-		EarlyData: allow0RTT,
-	})
 }

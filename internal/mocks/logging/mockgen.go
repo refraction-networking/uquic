@@ -9,14 +9,16 @@ import (
 	"github.com/refraction-networking/uquic/logging"
 )
 
-//go:generate sh -c "go run go.uber.org/mock/mockgen -build_flags=\"-tags=gomock\" -package internal -destination internal/tracer.go github.com/refraction-networking/uquic/internal/mocks/logging Tracer"
+//go:generate sh -c "go run go.uber.org/mock/mockgen -typed -build_flags=\"-tags=gomock\" -package internal -destination internal/tracer.go github.com/quic-go/quic-go/internal/mocks/logging Tracer"
 type Tracer interface {
 	SentPacket(net.Addr, *logging.Header, logging.ByteCount, []logging.Frame)
 	SentVersionNegotiationPacket(_ net.Addr, dest, src logging.ArbitraryLenConnectionID, _ []logging.VersionNumber)
 	DroppedPacket(net.Addr, logging.PacketType, logging.ByteCount, logging.PacketDropReason)
+	Debug(name, msg string)
+	Close()
 }
 
-//go:generate sh -c "go run go.uber.org/mock/mockgen -build_flags=\"-tags=gomock\" -package internal -destination internal/connection_tracer.go github.com/refraction-networking/uquic/internal/mocks/logging ConnectionTracer"
+//go:generate sh -c "go run go.uber.org/mock/mockgen -typed -build_flags=\"-tags=gomock\" -package internal -destination internal/connection_tracer.go github.com/quic-go/quic-go/internal/mocks/logging ConnectionTracer"
 type ConnectionTracer interface {
 	StartedConnection(local, remote net.Addr, srcConnID, destConnID logging.ConnectionID)
 	NegotiatedVersion(chosen logging.VersionNumber, clientVersions, serverVersions []logging.VersionNumber)
@@ -31,7 +33,7 @@ type ConnectionTracer interface {
 	ReceivedLongHeaderPacket(*logging.ExtendedHeader, logging.ByteCount, logging.ECN, []logging.Frame)
 	ReceivedShortHeaderPacket(*logging.ShortHeader, logging.ByteCount, logging.ECN, []logging.Frame)
 	BufferedPacket(logging.PacketType, logging.ByteCount)
-	DroppedPacket(logging.PacketType, logging.ByteCount, logging.PacketDropReason)
+	DroppedPacket(logging.PacketType, logging.PacketNumber, logging.ByteCount, logging.PacketDropReason)
 	UpdatedMetrics(rttStats *logging.RTTStats, cwnd, bytesInFlight logging.ByteCount, packetsInFlight int)
 	AcknowledgedPacket(logging.EncryptionLevel, logging.PacketNumber)
 	LostPacket(logging.EncryptionLevel, logging.PacketNumber, logging.PacketLossReason)
@@ -45,6 +47,7 @@ type ConnectionTracer interface {
 	LossTimerExpired(logging.TimerType, logging.EncryptionLevel)
 	LossTimerCanceled()
 	ECNStateUpdated(state logging.ECNState, trigger logging.ECNStateTrigger)
+	ChoseALPN(protocol string)
 	// Close is called when the connection is closed.
 	Close()
 	Debug(name, msg string)

@@ -19,11 +19,12 @@ import (
 )
 
 var _ = Describe("Datagram test", func() {
-	const num = 100
+	const concurrentSends = 100
+	const maxDatagramSize = 250
 
 	var (
 		serverConn, clientConn *net.UDPConn
-		dropped, total         int32
+		dropped, total         atomic.Int32
 	)
 
 	startServerAndProxy := func(enableDatagram, expectDatagramSupport bool) (port int, closeFn func()) {
@@ -47,19 +48,24 @@ var _ = Describe("Datagram test", func() {
 
 			if expectDatagramSupport {
 				Expect(conn.ConnectionState().SupportsDatagrams).To(BeTrue())
-
 				if enableDatagram {
+					f := &wire.DatagramFrame{DataLenPresent: true}
 					var wg sync.WaitGroup
-					wg.Add(num)
-					for i := 0; i < num; i++ {
+					wg.Add(concurrentSends)
+					for i := 0; i < concurrentSends; i++ {
 						go func(i int) {
 							defer GinkgoRecover()
 							defer wg.Done()
 							b := make([]byte, 8)
 							binary.BigEndian.PutUint64(b, uint64(i))
-							Expect(conn.SendMessage(b)).To(Succeed())
+							Expect(conn.SendDatagram(b)).To(Succeed())
 						}(i)
 					}
+					maxDatagramMessageSize := f.MaxDataLen(maxDatagramSize, conn.ConnectionState().Version)
+					b := make([]byte, maxDatagramMessageSize+1)
+					Expect(conn.SendDatagram(b)).To(MatchError(&quic.DatagramTooLargeError{
+						PeerMaxDatagramFrameSize: int64(maxDatagramMessageSize),
+					}))
 					wg.Wait()
 				}
 			} else {
@@ -81,9 +87,9 @@ var _ = Describe("Datagram test", func() {
 				}
 				drop := mrand.Int()%10 == 0
 				if drop {
-					atomic.AddInt32(&dropped, 1)
+					dropped.Add(1)
 				}
-				atomic.AddInt32(&total, 1)
+				total.Add(1)
 				return drop
 			},
 		})
@@ -103,6 +109,8 @@ var _ = Describe("Datagram test", func() {
 	})
 
 	It("sends datagrams", func() {
+		oldMaxDatagramSize := wire.MaxDatagramSize
+		wire.MaxDatagramSize = maxDatagramSize
 		proxyPort, close := startServerAndProxy(true, true)
 		defer close()
 		raddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("localhost:%d", proxyPort))
@@ -120,22 +128,23 @@ var _ = Describe("Datagram test", func() {
 		for {
 			// Close the connection if no message is received for 100 ms.
 			timer := time.AfterFunc(scaleDuration(100*time.Millisecond), func() { conn.CloseWithError(0, "") })
-			if _, err := conn.ReceiveMessage(context.Background()); err != nil {
+			if _, err := conn.ReceiveDatagram(context.Background()); err != nil {
 				break
 			}
 			timer.Stop()
 			counter++
 		}
 
-		numDropped := int(atomic.LoadInt32(&dropped))
-		expVal := num - numDropped
-		fmt.Fprintf(GinkgoWriter, "Dropped %d out of %d packets.\n", numDropped, atomic.LoadInt32(&total))
-		fmt.Fprintf(GinkgoWriter, "Received %d out of %d sent datagrams.\n", counter, num)
+		numDropped := int(dropped.Load())
+		expVal := concurrentSends - numDropped
+		fmt.Fprintf(GinkgoWriter, "Dropped %d out of %d packets.\n", numDropped, total.Load())
+		fmt.Fprintf(GinkgoWriter, "Received %d out of %d sent datagrams.\n", counter, concurrentSends)
 		Expect(counter).To(And(
 			BeNumerically(">", expVal*9/10),
-			BeNumerically("<", num),
+			BeNumerically("<", concurrentSends),
 		))
 		Eventually(conn.Context().Done).Should(BeClosed())
+		wire.MaxDatagramSize = oldMaxDatagramSize
 	})
 
 	It("server can disable datagram", func() {
@@ -170,7 +179,7 @@ var _ = Describe("Datagram test", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(conn.ConnectionState().SupportsDatagrams).To(BeFalse())
 
-		Expect(conn.SendMessage([]byte{0})).To(HaveOccurred())
+		Expect(conn.SendDatagram([]byte{0})).To(HaveOccurred())
 
 		close()
 		conn.CloseWithError(0, "")

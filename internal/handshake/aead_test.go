@@ -16,7 +16,7 @@ import (
 )
 
 var _ = Describe("Long Header AEAD", func() {
-	for _, ver := range []protocol.VersionNumber{protocol.Version1, protocol.Version2} {
+	for _, ver := range []protocol.Version{protocol.Version1, protocol.Version2} {
 		v := ver
 
 		Context(fmt.Sprintf("using version %s", v), func() {
@@ -34,8 +34,8 @@ var _ = Describe("Long Header AEAD", func() {
 						aead, err := cipher.NewGCM(block)
 						Expect(err).ToNot(HaveOccurred())
 
-						return newLongHeaderSealer(aead, newHeaderProtector(cs, hpKey, true, v)),
-							newLongHeaderOpener(aead, newHeaderProtector(cs, hpKey, true, v))
+						return newLongHeaderSealer(&xorNonceAEAD{aead: aead}, newHeaderProtector(cs, hpKey, true, v)),
+							newLongHeaderOpener(&xorNonceAEAD{aead: aead}, newHeaderProtector(cs, hpKey, true, v))
 					}
 
 					Context("message encryption", func() {
