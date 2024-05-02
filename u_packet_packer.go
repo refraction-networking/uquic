@@ -123,9 +123,9 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxPacketSize protocol
 	}
 	if initialPayload.length > 0 {
 		if onlyAck || len(initialPayload.frames) == 0 {
-			// TODO: uQUIC should send Initial Packet if requested.
+			// TODO: uQUIC should send Initial Packet ACK if requested.
 			// However, it should be otherwise configurable whether to request
-			// to send Initial Packet or not. See quic-go#4007
+			// to send Initial Packet ACK or not. See quic-go#4007
 			padding := p.initialPaddingLen(initialPayload.frames, size, maxPacketSize)
 			cont, err := p.appendLongHeaderPacket(buffer, initialHdr, initialPayload, padding, protocol.EncryptionInitial, initialSealer, v)
 			if err != nil {
@@ -255,4 +255,80 @@ func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.Versi
 		return qfs.Build(cryptoData)
 	}
 	return p.uSpec.InitialPacketSpec.FrameBuilder.Build(cryptoData)
+}
+
+func (p *uPacketPacker) MaybePackProbePacket(encLevel protocol.EncryptionLevel, maxPacketSize protocol.ByteCount, v protocol.Version) (*coalescedPacket, error) {
+	if encLevel == protocol.Encryption1RTT {
+		s, err := p.cryptoSetup.Get1RTTSealer()
+		if err != nil {
+			return nil, err
+		}
+		kp := s.KeyPhase()
+		connID := p.getDestConnID()
+		pn, pnLen := p.pnManager.PeekPacketNumber(protocol.Encryption1RTT)
+		hdrLen := wire.ShortHeaderLen(connID, pnLen)
+		pl := p.maybeGetAppDataPacket(maxPacketSize-protocol.ByteCount(s.Overhead())-hdrLen, false, true, v)
+		if pl.length == 0 {
+			return nil, nil
+		}
+		buffer := getPacketBuffer()
+		packet := &coalescedPacket{buffer: buffer}
+		shp, err := p.appendShortHeaderPacket(buffer, connID, pn, pnLen, kp, pl, 0, maxPacketSize, s, false, v)
+		if err != nil {
+			return nil, err
+		}
+		packet.shortHdrPacket = &shp
+		return packet, nil
+	}
+
+	var hdr *wire.ExtendedHeader
+	var pl payload
+	var sealer handshake.LongHeaderSealer
+	//nolint:exhaustive // Probe packets are never sent for 0-RTT.
+	switch encLevel {
+	case protocol.EncryptionInitial:
+		var err error
+		sealer, err = p.cryptoSetup.GetInitialSealer()
+		if err != nil {
+			return nil, err
+		}
+		hdr, pl = p.maybeGetCryptoPacket(maxPacketSize-protocol.ByteCount(sealer.Overhead()), protocol.EncryptionInitial, false, true, v)
+	case protocol.EncryptionHandshake:
+		var err error
+		sealer, err = p.cryptoSetup.GetHandshakeSealer()
+		if err != nil {
+			return nil, err
+		}
+		hdr, pl = p.maybeGetCryptoPacket(maxPacketSize-protocol.ByteCount(sealer.Overhead()), protocol.EncryptionHandshake, false, true, v)
+	default:
+		panic("unknown encryption level")
+	}
+
+	if pl.length == 0 {
+		return nil, nil
+	}
+	buffer := getPacketBuffer()
+	packet := &coalescedPacket{buffer: buffer}
+	size := p.longHeaderPacketLength(hdr, pl, v) + protocol.ByteCount(sealer.Overhead())
+	var padding protocol.ByteCount
+	if encLevel == protocol.EncryptionInitial {
+		if p.uSpec == nil { // default behavior
+			padding = p.initialPaddingLen(pl.frames, size, maxPacketSize)
+		} else { // otherwise we resend the spec-based initial packet
+			initPkt, err := p.appendInitialPacket(buffer, hdr, pl, protocol.EncryptionInitial, sealer, v)
+			if err != nil {
+				return nil, err
+			}
+
+			packet.longHdrPackets = []*longHeaderPacket{initPkt}
+			return packet, nil
+		}
+	}
+
+	longHdrPacket, err := p.appendLongHeaderPacket(buffer, hdr, pl, padding, encLevel, sealer, v)
+	if err != nil {
+		return nil, err
+	}
+	packet.longHdrPackets = []*longHeaderPacket{longHdrPacket}
+	return packet, nil
 }
