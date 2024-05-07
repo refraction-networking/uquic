@@ -21,6 +21,59 @@ type QUICFrameBuilder interface {
 // It could be used to deterministically build QUIC Frames from crypto data.
 type QUICFrames []QUICFrame
 
+// QUICPacket is a struct that contains a slice of QUICFrame and the total length
+// of all frames including PADDING frames. It can be used to deterministically
+// build QUIC Packets with a target length.
+type QUICPacket struct {
+	Frames QUICFrames
+
+	Length uint16
+}
+
+// Build ingests data from crypto frames without the crypto frame header
+// and returns the byte representation of all frames as specified in
+// the Frames slice. It then calculates the padding sizes needed to
+// reach the specified Length and updates the PADDING frames accordingly.
+func (qp QUICPacket) Build(cryptoData []byte) (payload []byte, err error) {
+	// dry-run to determine the total length of all frames so far
+	dryrunPayload, err := qp.Frames.Build(cryptoData)
+	if err != nil {
+		return nil, err
+	}
+
+	// determine length of PADDING frames to append
+	lenPADDINGsigned := int64(qp.Length) - int64(len(dryrunPayload))
+	if lenPADDINGsigned > 0 {
+		lenPADDING := uint64(lenPADDINGsigned)
+		// determine number of PADDING frames to append
+		numPADDING := 0
+		for _, frame := range qp.Frames {
+			if _, ok := frame.(QUICFramePadding); ok {
+				numPADDING++
+			}
+		}
+
+		// create a list of values made from dividing lenPADDING into equal sizes of length numPADDING
+		paddingSizes := make([]uint64, numPADDING)
+		paddingSize := lenPADDING / uint64(numPADDING)
+		for i := 0; i < numPADDING; i++ {
+			paddingSizes[i] = paddingSize
+		}
+		// distribute the remaining lenPADDING into the list of values
+		remaining := lenPADDING % uint64(numPADDING)
+		paddingSizes[len(paddingSizes)-1] += remaining
+
+		// update the padding frames with the calculated sizes
+		for i, frame := range qp.Frames {
+			if _, ok := frame.(QUICFramePadding); ok {
+				qp.Frames[i] = QUICFramePadding{Length: int(paddingSizes[0])}
+				paddingSizes = paddingSizes[1:]
+			}
+		}
+	}
+	return qp.Frames.Build(cryptoData)
+}
+
 // Build ingests data from crypto frames without the crypto frame header
 // and returns the byte representation of all frames as specified in
 // the slice.
