@@ -46,6 +46,7 @@ type quicConn interface {
 	earlyConnReady() <-chan struct{}
 	handlePacket(receivedPacket)
 	run() error
+	runOscur0() error
 	destroy(error)
 	closeWithTransportError(TransportErrorCode)
 }

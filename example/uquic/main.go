@@ -24,10 +24,10 @@ func main() {
 
 	tlsConf := &tls.Config{
 		// ServerName: "quic.tlsfingerprint.io",
-		// ServerName: "www.cloudflare.com",
-		// MinVersion:   tls.VersionTLS13,
+		ServerName:   "www.cloudflare.com",
+		MinVersion:   tls.VersionTLS13,
 		KeyLogWriter: keyLogWriter,
-		// NextProtos:   []string{"h3"},
+		NextProtos:   []string{"h3"},
 	}
 
 	quicConf := &quic.Config{}
@@ -87,5 +87,5 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Response Body: %s", body.Bytes())
+	fmt.Printf("Response Body: ")
 }
