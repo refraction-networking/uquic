@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/gaukas/clienthellod"
+	"github.com/refraction-networking/clienthellod"
 	"github.com/refraction-networking/uquic/internal/handshake"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/wire"
@@ -250,8 +250,13 @@ func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.Versi
 		return nil, err
 	}
 
-	if p.uSpec.InitialPacketSpec.FrameBuilder == nil {
+	if p.uSpec.InitialPacketSpec.FrameBuilder == nil || len(p.uSpec.InitialPacketSpec.FrameBuilder.(QUICFrames)) == 0 {
 		qfs := QUICFrames{}
+		for _, frame := range qchframes {
+			if cryptoFrame, ok := frame.(*clienthellod.CRYPTO); ok {
+				qfs = append(qfs, QUICFrameCrypto{int(cryptoFrame.Offset), int(cryptoFrame.Length)})
+			}
+		}
 		return qfs.Build(cryptoData)
 	}
 	return p.uSpec.InitialPacketSpec.FrameBuilder.Build(cryptoData)

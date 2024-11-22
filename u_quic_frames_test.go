@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/gaukas/clienthellod"
+	"github.com/refraction-networking/clienthellod"
 )
 
 func TestQUICFrames(t *testing.T) {

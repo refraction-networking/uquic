@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	"math"
 	"math/big"
 	mrand "math/rand"
 
-	"github.com/gaukas/clienthellod"
+	"github.com/refraction-networking/clienthellod"
 	"github.com/refraction-networking/uquic/quicvarint"
 )
 
@@ -30,18 +31,26 @@ func (qfs QUICFrames) Build(cryptoData []byte) (payload []byte, err error) {
 		return qfsCryptoOnly.Build(cryptoData)
 	}
 
+	lowestOffset := math.MaxUint16
+	for _, frame := range qfs {
+		if offset, _, _ := frame.CryptoFrameInfo(); offset < lowestOffset {
+			lowestOffset = offset
+		}
+	}
+
 	for _, frame := range qfs {
 		var frameBytes []byte
 		if offset, length, cryptoOK := frame.CryptoFrameInfo(); cryptoOK {
+			lengthOffset := offset - lowestOffset
 			if length == 0 {
 				// calculate length: from offset to the end of cryptoData
-				length = len(cryptoData) - offset
+				length = len(cryptoData) - lengthOffset
 			}
 			frameBytes = []byte{0x06} // CRYPTO frame type
 			frameBytes = quicvarint.Append(frameBytes, uint64(offset))
 			frameBytes = quicvarint.Append(frameBytes, uint64(length))
 			frameCryptoData := make([]byte, length)
-			copy(frameCryptoData, cryptoData[offset:]) // copy at most length bytes
+			copy(frameCryptoData, cryptoData[lengthOffset:]) // copy at most length bytes
 			frameBytes = append(frameBytes, frameCryptoData...)
 		} else { // Handle none crypto frames: read and append to payload
 			frameBytes, err = frame.Read()
