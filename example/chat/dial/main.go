@@ -67,12 +67,7 @@ func main() {
 	stream, err := econn.OpenStream()
 	util.Check(err)
 
-	stream2, err := econn.OpenStream()
-	util.Check(err)
-
 	fmt.Println("Connected; type 'exit' to shutdown gracefully")
-
-	stream2.Write([]byte("testt\n"))
 
 	// Simulate a chat session
 	util.Chat(stream)

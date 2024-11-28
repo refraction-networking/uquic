@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"math/big"
 	"net"
-	"time"
 
 	"github.com/pion/dtls/v3/examples/util"
 	quic "github.com/refraction-networking/uquic"
@@ -66,15 +65,11 @@ func main() {
 				continue
 			}
 
-			for i := 0; i < 2; i++ {
-				ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
-				stream, err := econn.AcceptStream(ctx)
-				if err != nil {
-					continue
-				}
-				hub.Register(&streamConn{Stream: stream, Connection: econn})
-
+			stream, err := econn.AcceptStream(context.Background())
+			if err != nil {
+				continue
 			}
+			hub.Register(&streamConn{Stream: stream, Connection: econn})
 
 			// `conn` is of type `net.Conn` but may be casted to `dtls.Conn`
 			// using `dtlsConn := conn.(*dtls.Conn)` in order to to expose
