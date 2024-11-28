@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 
 	"github.com/pion/dtls/v3/examples/util"
 	quic "github.com/refraction-networking/uquic"
@@ -20,6 +25,13 @@ func main() {
 	addr, err := net.ResolveUDPAddr("udp", *remoteAddr)
 	util.Check(err)
 
+	rootCertificate, err := LoadCertificate("certificates/server.pub.pem")
+	util.Check(err)
+	certPool := x509.NewCertPool()
+	cert, err := x509.ParseCertificate(rootCertificate.Certificate[0])
+	util.Check(err)
+	certPool.AddCert(cert)
+
 	pconn, err := net.ListenUDP("udp", nil)
 	util.Check(err)
 	quicSpec, err := quic.QUICID2Spec(quic.QUICFirefox_116)
@@ -33,8 +45,8 @@ func main() {
 	}
 
 	econn, err := tp.DialEarly(context.Background(), addr, &tls.Config{
-		InsecureSkipVerify: true,
-		NextProtos:         []string{"h3"},
+		RootCAs:    certPool,
+		NextProtos: []string{"h3"},
 	}, &quic.Config{})
 	util.Check(err)
 
@@ -47,3 +59,38 @@ func main() {
 	util.Chat(stream)
 
 }
+
+// LoadCertificate Load/read certificate(s) from file
+func LoadCertificate(path string) (*tls.Certificate, error) {
+	rawData, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return nil, err
+	}
+
+	var certificate tls.Certificate
+
+	for {
+		block, rest := pem.Decode(rawData)
+		if block == nil {
+			break
+		}
+
+		if block.Type != "CERTIFICATE" {
+			return nil, errBlockIsNotCertificate
+		}
+
+		certificate.Certificate = append(certificate.Certificate, block.Bytes)
+		rawData = rest
+	}
+
+	if len(certificate.Certificate) == 0 {
+		return nil, errNoCertificateFound
+	}
+
+	return &certificate, nil
+}
+
+var (
+	errBlockIsNotCertificate = errors.New("block is not a certificate, unable to load certificates")
+	errNoCertificateFound    = errors.New("no certificate found, unable to load certificates")
+)

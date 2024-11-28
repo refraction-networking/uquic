@@ -4,14 +4,9 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
 	"encoding/hex"
-	"encoding/pem"
 	"flag"
 	"fmt"
-	"math/big"
 	"net"
 
 	"github.com/pion/dtls/v3/examples/util"
@@ -36,6 +31,9 @@ func main() {
 
 	flag.Parse()
 
+	certificate, err := tls.LoadX509KeyPair("certificates/server.pub.pem", "certificates/server.pem")
+	util.Check(err)
+
 	// Prepare the IP to connect to
 	addr, err := net.ResolveUDPAddr("udp", *listenAddr)
 	util.Check(err)
@@ -51,7 +49,10 @@ func main() {
 		Conn: pconn,
 	}
 
-	listener, err := tp.ListenEarly(generateTLSConfig(), &quic.Config{})
+	listener, err := tp.ListenEarly(&tls.Config{
+		Certificates: []tls.Certificate{certificate},
+		NextProtos:   []string{"h3"},
+	}, &quic.Config{})
 	util.Check(err)
 
 	// Simulate a chat session
@@ -81,28 +82,4 @@ func main() {
 
 	// Start chatting
 	hub.Chat()
-}
-
-// Setup a bare-bones TLS config for the server
-func generateTLSConfig() *tls.Config {
-	key, err := rsa.GenerateKey(rand.Reader, 1024)
-	if err != nil {
-		panic(err)
-	}
-	template := x509.Certificate{SerialNumber: big.NewInt(1)}
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
-	if err != nil {
-		panic(err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-
-	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		panic(err)
-	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{tlsCert},
-		NextProtos:   []string{"h3"},
-	}
 }
