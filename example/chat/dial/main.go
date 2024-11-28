@@ -20,24 +20,10 @@ func main() {
 	addr, err := net.ResolveUDPAddr("udp", *remoteAddr)
 	util.Check(err)
 
-	// pubkeyBytes, err := hex.DecodeString(*pubkey)
-	// util.Check(err)
-
 	pconn, err := net.ListenUDP("udp", nil)
 	util.Check(err)
 	quicSpec, err := quic.QUICID2Spec(quic.QUICFirefox_116)
 	util.Check(err)
-	for _, ext := range quicSpec.ClientHelloSpec.Extensions {
-		if ks, ok := ext.(*tls.KeyShareExtension); ok {
-			ks.KeyShares = []tls.KeyShare{
-				{
-					Group: tls.X25519Kyber768Draft00,
-					Data:  []byte{},
-				},
-			}
-			break
-		}
-	}
 
 	tp := quic.UTransport{
 		Transport: &quic.Transport{
@@ -46,21 +32,9 @@ func main() {
 		QUICSpec: &quicSpec,
 	}
 
-	// tp := &quic.Transport{
-	// 	Conn: pconn,
-	// }
-
-	// econn1, err := tp.DialEarly(context.Background(), addr, &tls.Config{
-	// 	InsecureSkipVerify: true,
-	// 	NextProtos:         []string{"h3"},
-	// }, &quic.Config{})
-	// util.Check(err)
-	// _ = econn1
-
 	econn, err := tp.DialEarly(context.Background(), addr, &tls.Config{
 		InsecureSkipVerify: true,
-		// CurvePreferences:   []tls.CurveID{tls.X25519Kyber768Draft00},
-		NextProtos: []string{"h3"},
+		NextProtos:         []string{"h3"},
 	}, &quic.Config{})
 	util.Check(err)
 
