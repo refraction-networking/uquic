@@ -10,7 +10,7 @@ require (
 	github.com/quic-go/qpack v0.5.1
 	github.com/refraction-networking/clienthellod v0.5.0-alpha2
 	github.com/refraction-networking/utls v1.6.6
-	go.uber.org/mock v0.4.0
+	go.uber.org/mock v0.5.0
 	golang.org/x/crypto v0.30.0
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842
 	golang.org/x/net v0.30.0
