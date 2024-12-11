@@ -7,7 +7,7 @@ require (
 	github.com/francoispqt/gojay v1.2.13
 	github.com/onsi/ginkgo/v2 v2.22.0
 	github.com/onsi/gomega v1.34.2
-	github.com/quic-go/qpack v0.4.0
+	github.com/quic-go/qpack v0.5.1
 	github.com/refraction-networking/clienthellod v0.5.0-alpha2
 	github.com/refraction-networking/utls v1.6.6
 	go.uber.org/mock v0.4.0
