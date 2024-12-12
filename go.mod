@@ -8,7 +8,7 @@ require (
 	github.com/onsi/gomega v1.33.1
 	github.com/quic-go/qpack v0.4.0
 	github.com/refraction-networking/clienthellod v0.5.0-alpha2
-	github.com/refraction-networking/utls v1.6.6
+	github.com/refraction-networking/utls v1.6.7
 	go.uber.org/mock v0.4.0
 	golang.org/x/crypto v0.31.0
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842
