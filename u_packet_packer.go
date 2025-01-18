@@ -250,7 +250,7 @@ func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.Versi
 		return nil, err
 	}
 
-	if p.uSpec.InitialPacketSpec.FrameBuilder == nil || len(p.uSpec.InitialPacketSpec.FrameBuilder.(QUICFrames)) == 0 {
+	if qf, ok := p.uSpec.InitialPacketSpec.FrameBuilder.(QUICFrames); p.uSpec.InitialPacketSpec.FrameBuilder == nil || ok && len(qf) == 0 {
 		qfs := QUICFrames{}
 		for _, frame := range qchframes {
 			if cryptoFrame, ok := frame.(*clienthellod.CRYPTO); ok {
