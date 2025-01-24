@@ -114,4 +114,8 @@ type CryptoSetup interface {
 	GetHandshakeSealer() (LongHeaderSealer, error)
 	Get0RTTSealer() (LongHeaderSealer, error)
 	Get1RTTSealer() (ShortHeaderSealer, error)
+
+	SetReadKey(el tls.QUICEncryptionLevel, suiteID uint16, trafficSecret []byte)
+	SetWriteKey(el tls.QUICEncryptionLevel, suiteID uint16, trafficSecret []byte)
+	HandshakeComplete()
 }

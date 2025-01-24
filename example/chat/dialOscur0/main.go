@@ -44,7 +44,7 @@ func main() {
 		QUICSpec: &quicSpec,
 	}
 
-	econn, err := tp.Dial(context.Background(), addr, &tls.Config{
+	econn, err := tp.DialOscur0(context.Background(), addr, &tls.Config{
 		RootCAs:    certPool,
 		NextProtos: []string{"h3"},
 	}, &quic.Config{})

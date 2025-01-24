@@ -62,6 +62,10 @@ type cryptoStreamHandler interface {
 	DiscardInitialKeys()
 	io.Closer
 	ConnectionState() handshake.ConnectionState
+
+	SetReadKey(el tls.QUICEncryptionLevel, suiteID uint16, trafficSecret []byte)
+	SetWriteKey(el tls.QUICEncryptionLevel, suiteID uint16, trafficSecret []byte)
+	HandshakeComplete()
 }
 
 type receivedPacket struct {
