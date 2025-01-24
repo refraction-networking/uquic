@@ -2,6 +2,7 @@ package handshake
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -199,26 +200,34 @@ func (h *uCryptoSetup) handleMessage(data []byte, encLevel protocol.EncryptionLe
 func (h *uCryptoSetup) handleEvent(ev tls.QUICEvent) (done bool, err error) {
 	switch ev.Kind {
 	case tls.QUICNoEvent:
+		fmt.Printf("tls.QUICNoEvent\n")
 		return true, nil
 	case tls.QUICSetReadSecret:
+		fmt.Printf("tls.QUICSetReadSecret\n")
 		h.setReadKey(ev.Level, ev.Suite, ev.Data)
 		return false, nil
 	case tls.QUICSetWriteSecret:
+		fmt.Printf("tls.QUICSetWriteSecret\n")
 		h.setWriteKey(ev.Level, ev.Suite, ev.Data)
 		return false, nil
 	case tls.QUICTransportParameters:
+		fmt.Printf("tls.QUICTransportParameters\n")
 		return false, h.handleTransportParameters(ev.Data)
 	case tls.QUICTransportParametersRequired:
+		fmt.Printf("tls.QUICTransportParametersRequired\n")
 		h.conn.SetTransportParameters(h.ourParams.Marshal(h.perspective))
 		// [UQUIC] doesn't expect this and may fail
 		return false, nil
 	case tls.QUICRejectedEarlyData:
+		fmt.Printf("tls.QUICRejectedEarlyData\n")
 		h.rejected0RTT()
 		return false, nil
 	case tls.QUICWriteData:
+		fmt.Printf("tls.QUICWriteData\n")
 		h.writeRecord(ev.Level, ev.Data)
 		return false, nil
 	case tls.QUICHandshakeDone:
+		fmt.Printf("tls.QUICHandshakeDone\n")
 		h.handshakeComplete()
 		return false, nil
 	default:
@@ -314,6 +323,10 @@ func (h *uCryptoSetup) rejected0RTT() {
 	}
 }
 
+func (h *uCryptoSetup) SetReadKey(el tls.QUICEncryptionLevel, suiteID uint16, trafficSecret []byte) {
+	h.setReadKey(el, suiteID, trafficSecret)
+}
+
 func (h *uCryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, trafficSecret []byte) {
 	suite := getCipherSuite(suiteID)
 	//nolint:exhaustive // The TLS stack doesn't export Initial keys.
@@ -330,6 +343,7 @@ func (h *uCryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, tr
 		if h.logger.Debug() {
 			h.logger.Debugf("Installed 0-RTT Read keys (using %s)", tls.CipherSuiteName(suite.ID))
 		}
+		fmt.Printf("0RTT read keys: %v\n", hex.EncodeToString(trafficSecret))
 	case tls.QUICEncryptionLevelHandshake:
 		h.handshakeOpener = newLongHeaderOpener(
 			createAEAD(suite, trafficSecret, h.version),
@@ -338,12 +352,14 @@ func (h *uCryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, tr
 		if h.logger.Debug() {
 			h.logger.Debugf("Installed Handshake Read keys (using %s)", tls.CipherSuiteName(suite.ID))
 		}
+		fmt.Printf("handshake read keys: %v\n", hex.EncodeToString(trafficSecret))
 	case tls.QUICEncryptionLevelApplication:
 		h.aead.SetReadKey(suite, trafficSecret)
 		h.has1RTTOpener = true
 		if h.logger.Debug() {
 			h.logger.Debugf("Installed 1-RTT Read keys (using %s)", tls.CipherSuiteName(suite.ID))
 		}
+		fmt.Printf("application read keys: %v\n", hex.EncodeToString(trafficSecret))
 	default:
 		panic("unexpected read encryption level")
 	}
@@ -353,6 +369,9 @@ func (h *uCryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, tr
 	}
 }
 
+func (h *uCryptoSetup) SetWriteKey(el tls.QUICEncryptionLevel, suiteID uint16, trafficSecret []byte) {
+	h.setWriteKey(el, suiteID, trafficSecret)
+}
 func (h *uCryptoSetup) setWriteKey(el tls.QUICEncryptionLevel, suiteID uint16, trafficSecret []byte) {
 	suite := getCipherSuite(suiteID)
 	//nolint:exhaustive // The TLS stack doesn't export Initial keys.
@@ -372,6 +391,7 @@ func (h *uCryptoSetup) setWriteKey(el tls.QUICEncryptionLevel, suiteID uint16, t
 			h.tracer.UpdatedKeyFromTLS(protocol.Encryption0RTT, h.perspective)
 		}
 		// don't set used0RTT here. 0-RTT might still get rejected.
+		fmt.Printf("0RTT write keys: %v\n", hex.EncodeToString(trafficSecret))
 		return
 	case tls.QUICEncryptionLevelHandshake:
 		h.handshakeSealer = newLongHeaderSealer(
@@ -381,6 +401,7 @@ func (h *uCryptoSetup) setWriteKey(el tls.QUICEncryptionLevel, suiteID uint16, t
 		if h.logger.Debug() {
 			h.logger.Debugf("Installed Handshake Write keys (using %s)", tls.CipherSuiteName(suite.ID))
 		}
+		fmt.Printf("handshake write keys: %v\n", hex.EncodeToString(trafficSecret))
 	case tls.QUICEncryptionLevelApplication:
 		h.aead.SetWriteKey(suite, trafficSecret)
 		h.has1RTTSealer = true
@@ -396,6 +417,7 @@ func (h *uCryptoSetup) setWriteKey(el tls.QUICEncryptionLevel, suiteID uint16, t
 				h.tracer.DroppedEncryptionLevel(protocol.Encryption0RTT)
 			}
 		}
+		fmt.Printf("application write keys: %v\n", hex.EncodeToString(trafficSecret))
 	default:
 		panic("unexpected write encryption level")
 	}
@@ -426,6 +448,10 @@ func (h *uCryptoSetup) DiscardInitialKeys() {
 	if dropped {
 		h.logger.Debugf("Dropping Initial keys.")
 	}
+}
+
+func (h *uCryptoSetup) HandshakeComplete() {
+	h.handshakeComplete()
 }
 
 func (h *uCryptoSetup) handshakeComplete() {
