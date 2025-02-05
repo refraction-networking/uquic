@@ -18,6 +18,17 @@ import (
 	tls "github.com/refraction-networking/utls"
 )
 
+type SameCIDGen struct {
+}
+
+func (*SameCIDGen) GenerateConnectionID() (ConnectionID, error) {
+	return ConnectionIDFromBytes([]uint8{1, 2, 3, 4}), nil
+}
+
+func (*SameCIDGen) ConnectionIDLen() int {
+	return 4
+}
+
 func (t *UTransport) DialOscur0(ctx context.Context, addr net.Addr, tlsConf *tls.Config, conf *Config) (Connection, error) {
 	return t.dialOscur0(ctx, addr, "", tlsConf, conf, false)
 }
@@ -38,6 +49,8 @@ func (t *UTransport) dialOscur0(ctx context.Context, addr net.Addr, host string,
 		}
 	}
 	// [/UQUIC]
+
+	t.ConnectionIDGenerator = &SameCIDGen{}
 
 	if err := t.init(t.isSingleUse); err != nil {
 		return nil, err
@@ -69,16 +82,17 @@ func udialOscur0(
 	}
 	c.packetHandlers = packetHandlers
 
-	// [UQUIC]
-	if uSpec.InitialPacketSpec.DestConnIDLength > 0 {
-		destConnID, err := generateConnectionIDForInitialWithLength(uSpec.InitialPacketSpec.DestConnIDLength)
-		if err != nil {
-			return nil, err
-		}
-		c.destConnID = destConnID
-	}
-	c.initialPacketNumber = protocol.PacketNumber(uSpec.InitialPacketSpec.InitPacketNumber)
-	// [/UQUIC]
+	c.destConnID, _ = connIDGenerator.GenerateConnectionID()
+	// // [UQUIC]
+	// if uSpec.InitialPacketSpec.DestConnIDLength > 0 {
+	// 	destConnID, err := generateConnectionIDForInitialWithLength(uSpec.InitialPacketSpec.DestConnIDLength)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	c.destConnID = destConnID
+	// }
+	// c.initialPacketNumber = protocol.PacketNumber(uSpec.InitialPacketSpec.InitPacketNumber)
+	// // [/UQUIC]
 
 	c.tracingID = nextConnTracingID()
 	if c.config.Tracer != nil {
@@ -155,6 +169,9 @@ func (c *uClient) dialOscur0(ctx context.Context) error {
 	if err != nil {
 		panic(err)
 	}
+
+	c.client.conn.(*connection).origDestConnID = ConnectionIDFromBytes([]uint8{0, 0, 0, 0, 0, 0, 0, 0})
+	c.client.conn.(*connection).handshakeDestConnID = ConnectionIDFromBytes([]uint8{0, 0, 0, 0, 0, 0, 0, 0})
 
 	c.client.conn.(*connection).handleTransportParameters(&wire.TransportParameters{
 		InitialMaxStreamDataBidiLocal:   524288,
@@ -540,4 +557,164 @@ runLoop:
 	s.logger.Infof("Connection %s closed.", s.logID)
 	s.timer.Stop()
 	return closeErr.err
+}
+
+func (l *EarlyListener) Oscur0Accept() (quicConn, error) {
+	srcCID := ConnectionIDFromBytes([]uint8{1, 2, 3, 4})
+	dstCID := ConnectionIDFromBytes([]uint8{1, 2, 3, 4})
+
+	return l.baseServer.Oscur0Accept(&net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 6667}, srcCID, dstCID)
+}
+
+func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, SrcConnectionID, DestConnectionID protocol.ConnectionID) (quicConn, error) {
+	// if len(hdr.Token) == 0 && hdr.DestConnectionID.Len() < protocol.MinConnectionIDLenInitial {
+	// 	if s.tracer != nil && s.tracer.DroppedPacket != nil {
+	// 		s.tracer.DroppedPacket(p.remoteAddr, logging.PacketTypeInitial, p.Size(), logging.PacketDropUnexpectedPacket)
+	// 	}
+	// 	p.buffer.Release()
+	// 	return errors.New("too short connection ID")
+	// }
+
+	// // The server queues packets for a while, and we might already have established a connection by now.
+	// // This results in a second check in the connection map.
+	// // That's ok since it's not the hot path (it's only taken by some Initial and 0-RTT packets).
+	// if handler, ok := s.connHandler.Get(hdr.DestConnectionID); ok {
+	// 	handler.handlePacket(p)
+	// 	return nil
+	// }
+
+	// if len(hdr.Token) > 0 {
+	// 	tok, err := s.tokenGenerator.DecodeToken(hdr.Token)
+	// 	if err == nil {
+	// 		if tok.IsRetryToken {
+	// 			origDestConnID = tok.OriginalDestConnectionID
+	// 			retrySrcConnID = &tok.RetrySrcConnectionID
+	// 		}
+	// 		token = tok
+	// 	}
+	// }
+	// if token != nil {
+	// 	clientAddrVerified = s.validateToken(token, p.remoteAddr)
+	// 	if !clientAddrVerified {
+	// 		// For invalid and expired non-retry tokens, we don't send an INVALID_TOKEN error.
+	// 		// We just ignore them, and act as if there was no token on this packet at all.
+	// 		// This also means we might send a Retry later.
+	// 		if !token.IsRetryToken {
+	// 			token = nil
+	// 		} else {
+	// 			// For Retry tokens, we send an INVALID_ERROR if
+	// 			// * the token is too old, or
+	// 			// * the token is invalid, in case of a retry token.
+	// 			select {
+	// 			case s.invalidTokenQueue <- rejectedPacket{receivedPacket: p, hdr: hdr}:
+	// 			default:
+	// 				// drop packet if we can't send out the  INVALID_TOKEN packets fast enough
+	// 				p.buffer.Release()
+	// 			}
+	// 			return nil
+	// 		}
+	// 	}
+	// }
+
+	// if token == nil && s.verifySourceAddress != nil && s.verifySourceAddress(p.remoteAddr) {
+	// 	// Retry invalidates all 0-RTT packets sent.
+	// 	delete(s.zeroRTTQueues, hdr.DestConnectionID)
+	// 	select {
+	// 	case s.retryQueue <- rejectedPacket{receivedPacket: p, hdr: hdr}:
+	// 	default:
+	// 		// drop packet if we can't send out Retry packets fast enough
+	// 		p.buffer.Release()
+	// 	}
+	// 	return nil
+	// }
+
+	config := s.config
+
+	var conn quicConn
+	tracingID := nextConnTracingID()
+	var tracer *logging.ConnectionTracer
+	s.connIDGenerator = &SameCIDGen{}
+	connID, err := s.connIDGenerator.GenerateConnectionID()
+	if err != nil {
+		return nil, err
+	}
+	s.logger.Debugf("Changing connection ID to %s.", connID)
+	conn = s.newConn(
+		newSendConn(s.conn, remoteAddr, packetInfo{}, s.logger),
+		s.connHandler,
+		connID,
+		&connID,
+		DestConnectionID,
+		SrcConnectionID,
+		connID,
+		s.connIDGenerator,
+		s.connHandler.GetStatelessResetToken(connID),
+		config,
+		s.tlsConf,
+		s.tokenGenerator,
+		true,
+		tracer,
+		tracingID,
+		s.logger,
+		Version1,
+	)
+	// Adding the connection will fail if the client's chosen Destination Connection ID is already in use.
+	// This is very unlikely: Even if an attacker chooses a connection ID that's already in use,
+	// under normal circumstances the packet would just be routed to that connection.
+	// The only time this collision will occur if we receive the two Initial packets at the same time.
+	if added := s.connHandler.AddWithConnID(DestConnectionID, connID, conn); !added {
+		delete(s.zeroRTTQueues, DestConnectionID)
+		conn.closeWithTransportError(qerr.ConnectionRefused)
+		return nil, fmt.Errorf("dst cid already in use")
+	}
+	// Pass queued 0-RTT to the newly established connection.
+	if q, ok := s.zeroRTTQueues[DestConnectionID]; ok {
+		for _, p := range q.packets {
+			conn.handlePacket(p)
+		}
+		delete(s.zeroRTTQueues, DestConnectionID)
+	}
+
+	go conn.runOscur0()
+
+	writeKey, err := hex.DecodeString("dc079246c2a46f42245546e02bf91ed7d0f3bca91e8b248445f9c39752b011e1")
+	if err != nil {
+		panic(err)
+	}
+
+	readKey, err := hex.DecodeString("df58c54c3924b0d078377cfe41af7f116dca94e69e3bee6eb28460831bd92dca")
+	if err != nil {
+		panic(err)
+	}
+
+	conn.(*connection).handleTransportParameters(&wire.TransportParameters{
+		InitialMaxStreamDataBidiLocal:  12582912,
+		InitialMaxStreamDataBidiRemote: 1048576,
+		InitialMaxStreamDataUni:        1048576,
+		InitialMaxData:                 25165824,
+		MaxAckDelay:                    20000000,
+		AckDelayExponent:               3,
+		DisableActiveMigration:         true,
+		MaxUDPPayloadSize:              protocol.MaxByteCount,
+		MaxUniStreamNum:                16,
+		MaxBidiStreamNum:               16,
+		MaxIdleTimeout:                 protocol.DefaultIdleTimeout,
+		PreferredAddress:               nil,
+		//   OriginalDestinationConnectionID: github.com/refraction-networking/uquic/internal/protocol.ConnectionID {b: [20]uint8 [0,
+		//  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], l: 0},
+		//   InitialSourceConnectionID: github.com/refraction-networking/uquic/internal/protocol.ConnectionID {b: [20]uint8 [11,
+		//  69,27,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], l: 3},
+		RetrySourceConnectionID: nil,
+		StatelessResetToken:     nil,
+		ActiveConnectionIDLimit: 8,
+		MaxDatagramFrameSize:    1200,
+		ClientOverride:          nil})
+
+	conn.(*connection).cryptoStreamHandler.SetReadKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, readKey)
+	conn.(*connection).cryptoStreamHandler.SetWriteKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, writeKey)
+	conn.(*connection).cryptoStreamHandler.HandshakeComplete()
+	conn.(*connection).handshakeComplete = true
+	conn.(*connection).handleHandshakeComplete()
+
+	return conn, nil
 }
