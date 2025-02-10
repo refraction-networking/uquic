@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"os"
 
 	"github.com/pion/dtls/v3/examples/util"
 	quic "github.com/refraction-networking/uquic"
@@ -47,13 +46,8 @@ func main() {
 
 	pconn, err := net.ListenUDP("udp", addr)
 	util.Check(err)
-
-	f, err := os.Create("events.sqlog")
-	util.Check(err)
-
 	tp := quic.Transport{
-		Conn:   pconn,
-		Tracer: qlog.NewTracer(f),
+		Conn: pconn,
 	}
 
 	listener, err := tp.ListenEarly(&tls.Config{
@@ -66,25 +60,27 @@ func main() {
 	hub := util.NewHub()
 
 	go func() {
-		for {
-			// Wait for a connection.
-			econn, err := listener.Accept(context.Background())
-			if err != nil {
-				continue
-			}
+		// 	for {
+		// 		// Wait for a connection.
+		econn, err := listener.Oscur0Accept()
+		util.Check(err)
 
+		for {
 			stream, err := econn.AcceptStream(context.Background())
 			if err != nil {
 				continue
 			}
+			// stream, err := econn.OpenStream()
 			hub.Register(&streamConn{Stream: stream, Connection: econn})
-
-			// `conn` is of type `net.Conn` but may be casted to `dtls.Conn`
-			// using `dtlsConn := conn.(*dtls.Conn)` in order to to expose
-			// functions like `ConnectionState` etc.
-
-			// Register the connection with the chat hub
+			return
 		}
+
+		// `conn` is of type `net.Conn` but may be casted to `dtls.Conn`
+		// using `dtlsConn := conn.(*dtls.Conn)` in order to to expose
+		// functions like `ConnectionState` etc.
+
+		// 		// Register the connection with the chat hub
+		// 	}
 	}()
 
 	// Start chatting

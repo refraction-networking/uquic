@@ -916,12 +916,12 @@ func (h *sentPacketHandler) ResetForRetry(now time.Time) error {
 }
 
 func (h *sentPacketHandler) SetHandshakeConfirmed() {
-	if h.initialPackets != nil {
-		panic("didn't drop initial correctly")
-	}
-	if h.handshakePackets != nil {
-		panic("didn't drop handshake correctly")
-	}
+	// if h.initialPackets != nil {
+	// 	panic("didn't drop initial correctly")
+	// }
+	// if h.handshakePackets != nil {
+	// 	panic("didn't drop handshake correctly")
+	// }
 	h.handshakeConfirmed = true
 	// We don't send PTOs for application data packets before the handshake completes.
 	// Make sure the timer is armed now, if necessary.

@@ -22,10 +22,10 @@ func main() {
 
 	tlsConf := &tls.Config{
 		// ServerName: "quic.tlsfingerprint.io",
-		// ServerName: "www.cloudflare.com",
-		// MinVersion:   tls.VersionTLS13,
+		ServerName:   "www.cloudflare.com",
+		MinVersion:   tls.VersionTLS13,
 		KeyLogWriter: keyLogWriter,
-		// NextProtos:   []string{"h3"},
+		NextProtos:   []string{"h3"},
 	}
 
 	quicConf := &quic.Config{}
@@ -53,8 +53,8 @@ func main() {
 		Transport: uRoundTripper,
 	}
 
-	addr := "https://quic.tlsfingerprint.io/qfp/?beautify=true"
-	// addr := "https://www.cloudflare.com"
+	// addr := "https://quic.tlsfingerprint.io/qfp/?beautify=true"
+	addr := "https://www.cloudflare.com"
 
 	rsp, err := hclient.Get(addr)
 	if err != nil {
@@ -67,5 +67,5 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Response Body: %s", body.Bytes())
+	fmt.Printf("Response Body: ")
 }

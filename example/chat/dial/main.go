@@ -18,10 +18,13 @@ import (
 
 func main() {
 	var remoteAddr = flag.String("raddr", "127.0.0.1:6666", "remote address")
+	var localAddr = flag.String("laddr", "127.0.0.1:6667", "remote address")
 	// var pubkey = flag.String("secret", "0b63baad7f2f4bb5b547c53adc0fbb179852910607935e6f4b5639fd989b1156", "shared secret")
 	// var covert = flag.String("covert", "1.2.3.4:5678", "covert address")
 	flag.Parse()
 
+	laddr, err := net.ResolveUDPAddr("udp", *localAddr)
+	util.Check(err)
 	addr, err := net.ResolveUDPAddr("udp", *remoteAddr)
 	util.Check(err)
 
@@ -32,7 +35,7 @@ func main() {
 	util.Check(err)
 	certPool.AddCert(cert)
 
-	pconn, err := net.ListenUDP("udp", nil)
+	pconn, err := net.ListenUDP("udp", laddr)
 	util.Check(err)
 	quicSpec, err := quic.QUICID2Spec(quic.QUICFirefox_116)
 	util.Check(err)

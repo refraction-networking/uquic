@@ -513,22 +513,22 @@ runLoop:
 			}
 		}
 
-		if keepAliveTime := s.nextKeepAliveTime(); !keepAliveTime.IsZero() && !now.Before(keepAliveTime) {
-			// send a PING frame since there is no activity in the connection
-			s.logger.Debugf("Sending a keep-alive PING to keep the connection alive.")
-			s.framer.QueueControlFrame(&wire.PingFrame{})
-			s.keepAlivePingSent = true
-		} else if !s.handshakeComplete && now.Sub(s.creationTime) >= s.config.handshakeTimeout() {
-			s.destroyImpl(qerr.ErrHandshakeTimeout)
-			continue
-		} else {
-			idleTimeoutStartTime := s.idleTimeoutStartTime()
-			if (!s.handshakeComplete && now.Sub(idleTimeoutStartTime) >= s.config.HandshakeIdleTimeout) ||
-				(s.handshakeComplete && now.After(s.nextIdleTimeoutTime())) {
-				s.destroyImpl(qerr.ErrIdleTimeout)
-				continue
-			}
-		}
+		// if keepAliveTime := s.nextKeepAliveTime(); !keepAliveTime.IsZero() && !now.Before(keepAliveTime) {
+		// 	// send a PING frame since there is no activity in the connection
+		// 	s.logger.Debugf("Sending a keep-alive PING to keep the connection alive.")
+		// 	s.framer.QueueControlFrame(&wire.PingFrame{})
+		// 	s.keepAlivePingSent = true
+		// } else if !s.handshakeComplete && now.Sub(s.creationTime) >= s.config.handshakeTimeout() {
+		// 	s.destroyImpl(qerr.ErrHandshakeTimeout)
+		// 	continue
+		// } else {
+		// 	idleTimeoutStartTime := s.idleTimeoutStartTime()
+		// 	if (!s.handshakeComplete && now.Sub(idleTimeoutStartTime) >= s.config.HandshakeIdleTimeout) ||
+		// 		(s.handshakeComplete && now.After(s.nextIdleTimeoutTime())) {
+		// 		s.destroyImpl(qerr.ErrIdleTimeout)
+		// 		continue
+		// 	}
+		// }
 
 		if s.sendQueue.WouldBlock() {
 			// The send queue is still busy sending out packets.
@@ -632,13 +632,23 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, SrcConnectionID, DestConn
 
 	var conn quicConn
 	tracingID := nextConnTracingID()
-	var tracer *logging.ConnectionTracer
+
 	s.connIDGenerator = &SameCIDGen{}
 	connID, err := s.connIDGenerator.GenerateConnectionID()
 	if err != nil {
 		return nil, err
 	}
 	s.logger.Debugf("Changing connection ID to %s.", connID)
+
+	var tracer *logging.ConnectionTracer
+	if config.Tracer != nil {
+		// // Use the same connection ID that is passed to the client's GetLogWriter callback.
+		// connID := hdr.DestConnectionID
+		// if origDestConnID.Len() > 0 {
+		// 	connID = origDestConnID
+		// }
+		tracer = config.Tracer(context.WithValue(context.Background(), ConnectionTracingKey, tracingID), protocol.PerspectiveServer, connID)
+	}
 	conn = s.newConn(
 		newSendConn(s.conn, remoteAddr, packetInfo{}, s.logger),
 		s.connHandler,
@@ -702,13 +712,12 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, SrcConnectionID, DestConn
 		PreferredAddress:               nil,
 		//   OriginalDestinationConnectionID: github.com/refraction-networking/uquic/internal/protocol.ConnectionID {b: [20]uint8 [0,
 		//  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], l: 0},
-		//   InitialSourceConnectionID: github.com/refraction-networking/uquic/internal/protocol.ConnectionID {b: [20]uint8 [11,
-		//  69,27,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], l: 3},
-		RetrySourceConnectionID: nil,
-		StatelessResetToken:     nil,
-		ActiveConnectionIDLimit: 8,
-		MaxDatagramFrameSize:    1200,
-		ClientOverride:          nil})
+		InitialSourceConnectionID: connID,
+		RetrySourceConnectionID:   nil,
+		StatelessResetToken:       nil,
+		ActiveConnectionIDLimit:   8,
+		MaxDatagramFrameSize:      1200,
+		ClientOverride:            nil})
 
 	conn.(*connection).cryptoStreamHandler.SetReadKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, readKey)
 	conn.(*connection).cryptoStreamHandler.SetWriteKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, writeKey)
