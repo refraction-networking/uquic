@@ -195,7 +195,7 @@ func (c *uClient) dialOscur0(ctx context.Context) error {
 		PreferredAddress:                nil,
 		RetrySourceConnectionID:         nil,
 		StatelessResetToken:             &protocol.StatelessResetToken{40, 46, 38, 234, 106, 208, 207, 28, 246, 176, 190, 31, 90, 150, 17, 222},
-		ActiveConnectionIDLimit:         4,
+		ActiveConnectionIDLimit:         1,
 		MaxDatagramFrameSize:            -1,
 		ClientOverride:                  nil,
 	})
@@ -357,7 +357,7 @@ var newUClientConnectionOscur0 = func(
 			// If set to the default value, it will be omitted from the transport parameters, which will make
 			// old quic-go versions interpret it as 0, instead of the default value of 2.
 			// See https://github.com/refraction-networking/uquic/pull/3806.
-			ActiveConnectionIDLimit:   protocol.MaxActiveConnectionIDs,
+			ActiveConnectionIDLimit:   1,
 			InitialSourceConnectionID: srcConnID,
 		}
 		if s.config.EnableDatagrams {
@@ -713,7 +713,7 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, SrcConnectionID, DestConn
 		MaxBidiStreamNum:               protocol.DefaultMaxIncomingStreams,
 		MaxIdleTimeout:                 protocol.DefaultIdleTimeout,
 		InitialSourceConnectionID:      SrcConnectionID,
-		ActiveConnectionIDLimit:        protocol.MaxActiveConnectionIDs,
+		ActiveConnectionIDLimit:        1,
 		MaxDatagramFrameSize:           1200,
 	})
 
