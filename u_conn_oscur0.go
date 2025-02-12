@@ -33,6 +33,9 @@ func (t *UTransport) DialOscur0(ctx context.Context, addr net.Addr, tlsConf *tls
 	return t.dialOscur0(ctx, addr, "", tlsConf, conf, false)
 }
 
+var srcCID = ConnectionIDFromBytes([]uint8{1, 2, 3, 4})
+var dstCID = ConnectionIDFromBytes([]uint8{5, 6, 7, 8})
+
 func (t *UTransport) dialOscur0(ctx context.Context, addr net.Addr, host string, tlsConf *tls.Config, conf *Config, use0RTT bool) (EarlyConnection, error) {
 	if err := validateConfig(conf); err != nil {
 		return nil, err
@@ -82,7 +85,9 @@ func udialOscur0(
 	}
 	c.packetHandlers = packetHandlers
 
-	c.destConnID, _ = connIDGenerator.GenerateConnectionID()
+	c.destConnID = dstCID
+	c.srcConnID = srcCID
+
 	// // [UQUIC]
 	// if uSpec.InitialPacketSpec.DestConnIDLength > 0 {
 	// 	destConnID, err := generateConnectionIDForInitialWithLength(uSpec.InitialPacketSpec.DestConnIDLength)
@@ -170,8 +175,8 @@ func (c *uClient) dialOscur0(ctx context.Context) error {
 		panic(err)
 	}
 
-	c.client.conn.(*connection).origDestConnID = ConnectionIDFromBytes([]uint8{0, 0, 0, 0, 0, 0, 0, 0})
-	c.client.conn.(*connection).handshakeDestConnID = ConnectionIDFromBytes([]uint8{0, 0, 0, 0, 0, 0, 0, 0})
+	c.client.conn.(*connection).origDestConnID = dstCID
+	c.client.conn.(*connection).handshakeDestConnID = dstCID
 
 	c.client.conn.(*connection).handleTransportParameters(&wire.TransportParameters{
 		InitialMaxStreamDataBidiLocal:   524288,
@@ -560,8 +565,6 @@ runLoop:
 }
 
 func (l *EarlyListener) Oscur0Accept() (quicConn, error) {
-	srcCID := ConnectionIDFromBytes([]uint8{1, 2, 3, 4})
-	dstCID := ConnectionIDFromBytes([]uint8{1, 2, 3, 4})
 
 	return l.baseServer.Oscur0Accept(&net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 6667}, srcCID, dstCID)
 }
@@ -633,12 +636,12 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, SrcConnectionID, DestConn
 	var conn quicConn
 	tracingID := nextConnTracingID()
 
-	s.connIDGenerator = &SameCIDGen{}
-	connID, err := s.connIDGenerator.GenerateConnectionID()
-	if err != nil {
-		return nil, err
-	}
-	s.logger.Debugf("Changing connection ID to %s.", connID)
+	// s.connIDGenerator = &SameCIDGen{}
+	// connID, err := s.connIDGenerator.GenerateConnectionID()
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// s.logger.Debugf("Changing connection ID to %s.", connID)
 
 	var tracer *logging.ConnectionTracer
 	if config.Tracer != nil {
@@ -647,18 +650,18 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, SrcConnectionID, DestConn
 		// if origDestConnID.Len() > 0 {
 		// 	connID = origDestConnID
 		// }
-		tracer = config.Tracer(context.WithValue(context.Background(), ConnectionTracingKey, tracingID), protocol.PerspectiveServer, connID)
+		tracer = config.Tracer(context.WithValue(context.Background(), ConnectionTracingKey, tracingID), protocol.PerspectiveServer, srcCID)
 	}
 	conn = s.newConn(
 		newSendConn(s.conn, remoteAddr, packetInfo{}, s.logger),
 		s.connHandler,
-		connID,
-		&connID,
+		DestConnectionID,
+		&SrcConnectionID,
 		DestConnectionID,
 		SrcConnectionID,
-		connID,
+		SrcConnectionID,
 		s.connIDGenerator,
-		s.connHandler.GetStatelessResetToken(connID),
+		s.connHandler.GetStatelessResetToken(SrcConnectionID),
 		config,
 		s.tlsConf,
 		s.tokenGenerator,
@@ -672,7 +675,7 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, SrcConnectionID, DestConn
 	// This is very unlikely: Even if an attacker chooses a connection ID that's already in use,
 	// under normal circumstances the packet would just be routed to that connection.
 	// The only time this collision will occur if we receive the two Initial packets at the same time.
-	if added := s.connHandler.AddWithConnID(DestConnectionID, connID, conn); !added {
+	if added := s.connHandler.AddWithConnID(DestConnectionID, SrcConnectionID, conn); !added {
 		delete(s.zeroRTTQueues, DestConnectionID)
 		conn.closeWithTransportError(qerr.ConnectionRefused)
 		return nil, fmt.Errorf("dst cid already in use")
@@ -698,32 +701,38 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, SrcConnectionID, DestConn
 	}
 
 	conn.(*connection).handleTransportParameters(&wire.TransportParameters{
-		InitialMaxStreamDataBidiLocal:  12582912,
-		InitialMaxStreamDataBidiRemote: 1048576,
-		InitialMaxStreamDataUni:        1048576,
-		InitialMaxData:                 25165824,
-		MaxAckDelay:                    20000000,
-		AckDelayExponent:               3,
+		InitialMaxStreamDataBidiLocal:  protocol.DefaultMaxReceiveStreamFlowControlWindow,
+		InitialMaxStreamDataBidiRemote: protocol.DefaultMaxReceiveStreamFlowControlWindow,
+		InitialMaxStreamDataUni:        protocol.DefaultMaxReceiveStreamFlowControlWindow,
+		InitialMaxData:                 protocol.DefaultMaxReceiveConnectionFlowControlWindow,
+		MaxAckDelay:                    protocol.MaxAckDelayInclGranularity,
+		AckDelayExponent:               protocol.AckDelayExponent,
 		DisableActiveMigration:         true,
 		MaxUDPPayloadSize:              protocol.MaxByteCount,
-		MaxUniStreamNum:                16,
-		MaxBidiStreamNum:               16,
+		MaxUniStreamNum:                protocol.DefaultMaxIncomingUniStreams,
+		MaxBidiStreamNum:               protocol.DefaultMaxIncomingStreams,
 		MaxIdleTimeout:                 protocol.DefaultIdleTimeout,
-		PreferredAddress:               nil,
-		//   OriginalDestinationConnectionID: github.com/refraction-networking/uquic/internal/protocol.ConnectionID {b: [20]uint8 [0,
-		//  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], l: 0},
-		InitialSourceConnectionID: connID,
-		RetrySourceConnectionID:   nil,
-		StatelessResetToken:       nil,
-		ActiveConnectionIDLimit:   8,
-		MaxDatagramFrameSize:      1200,
-		ClientOverride:            nil})
+		InitialSourceConnectionID:      SrcConnectionID,
+		ActiveConnectionIDLimit:        protocol.MaxActiveConnectionIDs,
+		MaxDatagramFrameSize:           1200,
+	})
 
 	conn.(*connection).cryptoStreamHandler.SetReadKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, readKey)
 	conn.(*connection).cryptoStreamHandler.SetWriteKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, writeKey)
 	conn.(*connection).cryptoStreamHandler.HandshakeComplete()
 	conn.(*connection).handshakeComplete = true
 	conn.(*connection).handleHandshakeComplete()
+
+	chRand := [32]byte{}
+	_, err = fmt.Printf("%s %x %x\n", "CLIENT_TRAFFIC_SECRET_0", chRand, readKey)
+	if err != nil {
+		panic(err)
+	}
+
+	_, err = fmt.Printf("%s %x %x\n", "SERVER_TRAFFIC_SECRET_0", chRand, writeKey)
+	if err != nil {
+		panic(err)
+	}
 
 	return conn, nil
 }
