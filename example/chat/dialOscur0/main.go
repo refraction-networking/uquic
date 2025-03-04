@@ -1,27 +1,16 @@
 package main
 
 import (
-	"context"
-	"crypto/x509"
-	"encoding/pem"
-	"errors"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 
 	"github.com/pion/dtls/v3/examples/util"
 	quic "github.com/refraction-networking/uquic"
-	"github.com/refraction-networking/uquic/qlog"
-	tls "github.com/refraction-networking/utls"
 )
 
 func main() {
-	keyLogWriter, err := os.Create("./keylog.txt")
-	if err != nil {
-		panic(err)
-	}
 
 	var remoteAddr = flag.String("raddr", "127.0.0.1:6666", "remote address")
 	// var pubkey = flag.String("secret", "0b63baad7f2f4bb5b547c53adc0fbb179852910607935e6f4b5639fd989b1156", "shared secret")
@@ -34,30 +23,21 @@ func main() {
 	addr, err := net.ResolveUDPAddr("udp", *remoteAddr)
 	util.Check(err)
 
-	rootCertificate, err := LoadCertificate("certificates/server.pub.pem")
-	util.Check(err)
-	certPool := x509.NewCertPool()
-	cert, err := x509.ParseCertificate(rootCertificate.Certificate[0])
-	util.Check(err)
-	certPool.AddCert(cert)
-
 	pconn, err := net.ListenUDP("udp", laddr)
 	util.Check(err)
-	quicSpec, err := quic.QUICID2Spec(quic.QUICFirefox_116)
+
+	readKey, err := hex.DecodeString("dc079246c2a46f42245546e02bf91ed7d0f3bca91e8b248445f9c39752b011e1")
 	util.Check(err)
 
-	tp := quic.UTransport{
-		Transport: &quic.Transport{
-			Conn: pconn,
-		},
-		QUICSpec: &quicSpec,
-	}
+	writeKey, err := hex.DecodeString("df58c54c3924b0d078377cfe41af7f116dca94e69e3bee6eb28460831bd92dca")
+	util.Check(err)
 
-	econn, err := tp.DialOscur0(context.Background(), addr, &tls.Config{
-		RootCAs:      certPool,
-		KeyLogWriter: keyLogWriter,
-		NextProtos:   []string{"h3"},
-	}, &quic.Config{Tracer: qlog.DefaultTracer})
+	econn, err := quic.Oscur0Client(pconn, addr, &quic.Oscur0Config{
+		ReadKey:      readKey,
+		WriteKey:     writeKey,
+		ClientConnID: []uint8{1, 2, 3, 4},
+		ServerConnID: []uint8{5, 6, 7, 8},
+	})
 	util.Check(err)
 
 	stream, err := econn.OpenStream()
@@ -69,38 +49,3 @@ func main() {
 	util.Chat(stream)
 
 }
-
-// LoadCertificate Load/read certificate(s) from file
-func LoadCertificate(path string) (*tls.Certificate, error) {
-	rawData, err := os.ReadFile(filepath.Clean(path))
-	if err != nil {
-		return nil, err
-	}
-
-	var certificate tls.Certificate
-
-	for {
-		block, rest := pem.Decode(rawData)
-		if block == nil {
-			break
-		}
-
-		if block.Type != "CERTIFICATE" {
-			return nil, errBlockIsNotCertificate
-		}
-
-		certificate.Certificate = append(certificate.Certificate, block.Bytes)
-		rawData = rest
-	}
-
-	if len(certificate.Certificate) == 0 {
-		return nil, errNoCertificateFound
-	}
-
-	return &certificate, nil
-}
-
-var (
-	errBlockIsNotCertificate = errors.New("block is not a certificate, unable to load certificates")
-	errNoCertificateFound    = errors.New("no certificate found, unable to load certificates")
-)

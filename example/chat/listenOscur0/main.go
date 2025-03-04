@@ -11,8 +11,6 @@ import (
 
 	"github.com/pion/dtls/v3/examples/util"
 	quic "github.com/refraction-networking/uquic"
-	"github.com/refraction-networking/uquic/qlog"
-	tls "github.com/refraction-networking/utls"
 )
 
 const (
@@ -29,14 +27,15 @@ type streamConn struct {
 
 func main() {
 	var listenAddr = flag.String("laddr", "0.0.0.0:6666", "listen address")
+	var remoteAddr = flag.String("raddr", "127.0.0.1:6667", "listen address")
 
 	flag.Parse()
 
-	certificate, err := tls.LoadX509KeyPair("certificates/server.pub.pem", "certificates/server.pem")
-	util.Check(err)
-
 	// Prepare the IP to connect to
 	addr, err := net.ResolveUDPAddr("udp", *listenAddr)
+	util.Check(err)
+
+	raddr, err := net.ResolveUDPAddr("udp", *remoteAddr)
 	util.Check(err)
 
 	priv, err := hex.DecodeString(station_privkey)
@@ -46,26 +45,29 @@ func main() {
 
 	pconn, err := net.ListenUDP("udp", addr)
 	util.Check(err)
-	tp := quic.Transport{
-		Conn: pconn,
-	}
-
-	listener, err := tp.ListenEarly(&tls.Config{
-		Certificates: []tls.Certificate{certificate},
-		NextProtos:   []string{"h3"},
-	}, &quic.Config{Tracer: qlog.DefaultTracer})
-	util.Check(err)
 
 	// Simulate a chat session
 	hub := util.NewHub()
 
+	writeKey, err := hex.DecodeString("dc079246c2a46f42245546e02bf91ed7d0f3bca91e8b248445f9c39752b011e1")
+	util.Check(err)
+
+	readKey, err := hex.DecodeString("df58c54c3924b0d078377cfe41af7f116dca94e69e3bee6eb28460831bd92dca")
+	util.Check(err)
+
 	go func() {
 		// 	for {
 		// 		// Wait for a connection.
-		econn, err := listener.Oscur0Accept()
+		econn, err := quic.Oscur0Server(pconn, raddr, &quic.Oscur0Config{
+			ReadKey:      readKey,
+			WriteKey:     writeKey,
+			ClientConnID: []uint8{1, 2, 3, 4},
+			ServerConnID: []uint8{5, 6, 7, 8},
+		})
 		util.Check(err)
 
 		for {
+
 			stream, err := econn.AcceptStream(context.Background())
 			if err != nil {
 				continue

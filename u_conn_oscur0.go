@@ -2,7 +2,6 @@ package quic
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -19,24 +18,24 @@ import (
 )
 
 type SameCIDGen struct {
+	id []byte
 }
 
-func (*SameCIDGen) GenerateConnectionID() (ConnectionID, error) {
-	return ConnectionIDFromBytes([]uint8{1, 2, 3, 4}), nil
+func (s *SameCIDGen) GenerateConnectionID() (ConnectionID, error) {
+	return ConnectionIDFromBytes(s.id), nil
 }
 
-func (*SameCIDGen) ConnectionIDLen() int {
-	return 4
+func (s *SameCIDGen) ConnectionIDLen() int {
+	return len(s.id)
 }
 
-func (t *UTransport) DialOscur0(ctx context.Context, addr net.Addr, tlsConf *tls.Config, conf *Config) (Connection, error) {
-	return t.dialOscur0(ctx, addr, "", tlsConf, conf, false)
-}
+//	func (t *UTransport) DialOscur0(ctx context.Context, addr net.Addr, tlsConf *tls.Config, conf *Config) (Connection, error) {
+//		return t.dialOscur0(ctx, addr, "", tlsConf, conf, false)
+//	}
+// var srcCID = ConnectionIDFromBytes([]uint8{1, 2, 3, 4})
+// var dstCID = ConnectionIDFromBytes([]uint8{5, 6, 7, 8})
 
-var srcCID = ConnectionIDFromBytes([]uint8{1, 2, 3, 4})
-var dstCID = ConnectionIDFromBytes([]uint8{5, 6, 7, 8})
-
-func (t *UTransport) dialOscur0(ctx context.Context, addr net.Addr, host string, tlsConf *tls.Config, conf *Config, use0RTT bool) (EarlyConnection, error) {
+func (t *UTransport) dialOscur0(ctx context.Context, addr net.Addr, host string, tlsConf *tls.Config, conf *Config, use0RTT bool, oscur0Conf *Oscur0Config) (EarlyConnection, error) {
 	if err := validateConfig(conf); err != nil {
 		return nil, err
 	}
@@ -53,7 +52,7 @@ func (t *UTransport) dialOscur0(ctx context.Context, addr net.Addr, host string,
 	}
 	// [/UQUIC]
 
-	t.ConnectionIDGenerator = &SameCIDGen{}
+	t.ConnectionIDGenerator = &SameCIDGen{id: oscur0Conf.ClientConnID}
 
 	if err := t.init(t.isSingleUse); err != nil {
 		return nil, err
@@ -65,7 +64,7 @@ func (t *UTransport) dialOscur0(ctx context.Context, addr net.Addr, host string,
 	tlsConf = tlsConf.Clone()
 	tlsConf.MinVersion = tls.VersionTLS13
 	setTLSConfigServerName(tlsConf, addr, host)
-	return udialOscur0(ctx, newSendConn(t.conn, addr, packetInfo{}, utils.DefaultLogger), t.connIDGenerator, t.handlerMap, tlsConf, conf, onClose, use0RTT, t.QUICSpec)
+	return udialOscur0(ctx, newSendConn(t.conn, addr, packetInfo{}, utils.DefaultLogger), t.connIDGenerator, t.handlerMap, tlsConf, conf, onClose, use0RTT, t.QUICSpec, oscur0Conf)
 }
 
 func udialOscur0(
@@ -78,6 +77,7 @@ func udialOscur0(
 	onClose func(),
 	use0RTT bool,
 	uSpec *QUICSpec, // [UQUIC]
+	oscur0Conf *Oscur0Config,
 ) (quicConn, error) {
 	c, err := newClient(conn, connIDGenerator, config, tlsConf, onClose, use0RTT)
 	if err != nil {
@@ -85,8 +85,8 @@ func udialOscur0(
 	}
 	c.packetHandlers = packetHandlers
 
-	c.destConnID = dstCID
-	c.srcConnID = srcCID
+	c.destConnID = ConnectionIDFromBytes(oscur0Conf.ServerConnID)
+	c.srcConnID = ConnectionIDFromBytes(oscur0Conf.ClientConnID)
 
 	// // [UQUIC]
 	// if uSpec.InitialPacketSpec.DestConnIDLength > 0 {
@@ -114,13 +114,13 @@ func udialOscur0(
 	}
 	// [/UQUIC]
 
-	if err := uc.dialOscur0(ctx); err != nil {
+	if err := uc.dialOscur0(ctx, oscur0Conf); err != nil {
 		return nil, err
 	}
 	return uc.conn, nil
 }
 
-func (c *uClient) dialOscur0(ctx context.Context) error {
+func (c *uClient) dialOscur0(ctx context.Context, oscur0Conf *Oscur0Config) error {
 	c.logger.Infof("Starting new uQUIC connection to %s (%s -> %s), source connection ID %s, destination connection ID %s, version %s", c.tlsConf.ServerName, c.sendConn.LocalAddr(), c.sendConn.RemoteAddr(), c.srcConnID, c.destConnID, c.version)
 
 	// [UQUIC]
@@ -165,18 +165,8 @@ func (c *uClient) dialOscur0(ctx context.Context) error {
 
 	c.packetHandlers.Add(c.srcConnID, c.conn)
 
-	readKey, err := hex.DecodeString("dc079246c2a46f42245546e02bf91ed7d0f3bca91e8b248445f9c39752b011e1")
-	if err != nil {
-		panic(err)
-	}
-
-	writeKey, err := hex.DecodeString("df58c54c3924b0d078377cfe41af7f116dca94e69e3bee6eb28460831bd92dca")
-	if err != nil {
-		panic(err)
-	}
-
-	c.client.conn.(*connection).origDestConnID = dstCID
-	c.client.conn.(*connection).handshakeDestConnID = dstCID
+	c.client.conn.(*connection).origDestConnID = c.destConnID
+	c.client.conn.(*connection).handshakeDestConnID = c.destConnID
 
 	c.client.conn.(*connection).handleTransportParameters(&wire.TransportParameters{
 		InitialMaxStreamDataBidiLocal:   524288,
@@ -200,8 +190,8 @@ func (c *uClient) dialOscur0(ctx context.Context) error {
 		ClientOverride:                  nil,
 	})
 
-	c.client.conn.(*connection).cryptoStreamHandler.SetReadKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, readKey)
-	c.client.conn.(*connection).cryptoStreamHandler.SetWriteKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, writeKey)
+	c.client.conn.(*connection).cryptoStreamHandler.SetReadKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, oscur0Conf.ReadKey)
+	c.client.conn.(*connection).cryptoStreamHandler.SetWriteKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, oscur0Conf.WriteKey)
 	c.client.conn.(*connection).cryptoStreamHandler.HandshakeComplete()
 	c.client.conn.(*connection).handleHandshakeComplete()
 
@@ -564,12 +554,15 @@ runLoop:
 	return closeErr.err
 }
 
-func (l *EarlyListener) Oscur0Accept() (quicConn, error) {
+// func (l *EarlyListener) Oscur0Accept() (quicConn, error) {
 
-	return l.baseServer.Oscur0Accept(&net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 6667}, srcCID, dstCID)
-}
+// 	return l.baseServer.Oscur0Accept(&net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 6667}, srcCID, dstCID)
+// }
 
-func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, SrcConnectionID, DestConnectionID protocol.ConnectionID) (quicConn, error) {
+func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, oscur0Conf *Oscur0Config) (quicConn, error) {
+	SrcConnectionID := ConnectionIDFromBytes(oscur0Conf.ClientConnID)
+	DestConnectionID := ConnectionIDFromBytes(oscur0Conf.ServerConnID)
+
 	// if len(hdr.Token) == 0 && hdr.DestConnectionID.Len() < protocol.MinConnectionIDLenInitial {
 	// 	if s.tracer != nil && s.tracer.DroppedPacket != nil {
 	// 		s.tracer.DroppedPacket(p.remoteAddr, logging.PacketTypeInitial, p.Size(), logging.PacketDropUnexpectedPacket)
@@ -650,7 +643,7 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, SrcConnectionID, DestConn
 		// if origDestConnID.Len() > 0 {
 		// 	connID = origDestConnID
 		// }
-		tracer = config.Tracer(context.WithValue(context.Background(), ConnectionTracingKey, tracingID), protocol.PerspectiveServer, srcCID)
+		tracer = config.Tracer(context.WithValue(context.Background(), ConnectionTracingKey, tracingID), protocol.PerspectiveServer, SrcConnectionID)
 	}
 	conn = s.newConn(
 		newSendConn(s.conn, remoteAddr, packetInfo{}, s.logger),
@@ -690,16 +683,6 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, SrcConnectionID, DestConn
 
 	go conn.runOscur0()
 
-	writeKey, err := hex.DecodeString("dc079246c2a46f42245546e02bf91ed7d0f3bca91e8b248445f9c39752b011e1")
-	if err != nil {
-		panic(err)
-	}
-
-	readKey, err := hex.DecodeString("df58c54c3924b0d078377cfe41af7f116dca94e69e3bee6eb28460831bd92dca")
-	if err != nil {
-		panic(err)
-	}
-
 	conn.(*connection).handleTransportParameters(&wire.TransportParameters{
 		InitialMaxStreamDataBidiLocal:  protocol.DefaultMaxReceiveStreamFlowControlWindow,
 		InitialMaxStreamDataBidiRemote: protocol.DefaultMaxReceiveStreamFlowControlWindow,
@@ -717,19 +700,19 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, SrcConnectionID, DestConn
 		MaxDatagramFrameSize:           1200,
 	})
 
-	conn.(*connection).cryptoStreamHandler.SetReadKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, readKey)
-	conn.(*connection).cryptoStreamHandler.SetWriteKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, writeKey)
+	conn.(*connection).cryptoStreamHandler.SetReadKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, oscur0Conf.ReadKey)
+	conn.(*connection).cryptoStreamHandler.SetWriteKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, oscur0Conf.WriteKey)
 	conn.(*connection).cryptoStreamHandler.HandshakeComplete()
 	conn.(*connection).handshakeComplete = true
 	conn.(*connection).handleHandshakeComplete()
 
 	chRand := [32]byte{}
-	_, err = fmt.Printf("%s %x %x\n", "CLIENT_TRAFFIC_SECRET_0", chRand, readKey)
+	_, err := fmt.Printf("%s %x %x\n", "CLIENT_TRAFFIC_SECRET_0", chRand, oscur0Conf.ReadKey)
 	if err != nil {
 		panic(err)
 	}
 
-	_, err = fmt.Printf("%s %x %x\n", "SERVER_TRAFFIC_SECRET_0", chRand, writeKey)
+	_, err = fmt.Printf("%s %x %x\n", "SERVER_TRAFFIC_SECRET_0", chRand, oscur0Conf.WriteKey)
 	if err != nil {
 		panic(err)
 	}
