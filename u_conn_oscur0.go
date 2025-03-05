@@ -700,8 +700,8 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, oscur0Conf *Oscur0Config)
 		MaxDatagramFrameSize:           1200,
 	})
 
-	conn.(*connection).cryptoStreamHandler.SetReadKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, oscur0Conf.ReadKey)
-	conn.(*connection).cryptoStreamHandler.SetWriteKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, oscur0Conf.WriteKey)
+	conn.(*connection).cryptoStreamHandler.SetReadKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, oscur0Conf.WriteKey)
+	conn.(*connection).cryptoStreamHandler.SetWriteKey(tls.QUICEncryptionLevelApplication, tls.TLS_CHACHA20_POLY1305_SHA256, oscur0Conf.ReadKey)
 	conn.(*connection).cryptoStreamHandler.HandshakeComplete()
 	conn.(*connection).handshakeComplete = true
 	conn.(*connection).handleHandshakeComplete()
