@@ -681,8 +681,6 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, oscur0Conf *Oscur0Config)
 		delete(s.zeroRTTQueues, DestConnectionID)
 	}
 
-	go conn.runOscur0()
-
 	conn.(*connection).handleTransportParameters(&wire.TransportParameters{
 		InitialMaxStreamDataBidiLocal:  protocol.DefaultMaxReceiveStreamFlowControlWindow,
 		InitialMaxStreamDataBidiRemote: protocol.DefaultMaxReceiveStreamFlowControlWindow,
@@ -705,6 +703,8 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, oscur0Conf *Oscur0Config)
 	conn.(*connection).cryptoStreamHandler.HandshakeComplete()
 	conn.(*connection).handshakeComplete = true
 	conn.(*connection).handleHandshakeComplete()
+
+	go conn.runOscur0()
 
 	chRand := [32]byte{}
 	_, err := fmt.Printf("%s %x %x\n", "CLIENT_TRAFFIC_SECRET_0", chRand, oscur0Conf.ReadKey)
