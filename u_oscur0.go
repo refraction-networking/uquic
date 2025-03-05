@@ -19,7 +19,8 @@ func Oscur0Client(pconn net.PacketConn, addr net.Addr, oscur0Conf *Oscur0Config)
 
 	tp := UTransport{
 		Transport: &Transport{
-			Conn: pconn,
+			Conn:               pconn,
+			ConnectionIDLength: len(oscur0Conf.ClientConnID),
 		},
 		QUICSpec: &quicSpec,
 	}
@@ -45,7 +46,8 @@ func Oscur0Server(pconn net.PacketConn, addr net.Addr, oscur0Conf *Oscur0Config)
 	}
 
 	tp := Transport{
-		Conn: pconn,
+		Conn:               pconn,
+		ConnectionIDLength: len(oscur0Conf.ClientConnID),
 	}
 
 	server, ok := baseServerMap[pconn.LocalAddr().String()]

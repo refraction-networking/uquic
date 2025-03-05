@@ -61,8 +61,8 @@ func main() {
 		econn, err := quic.Oscur0Server(pconn, raddr, &quic.Oscur0Config{
 			ReadKey:      readKey,
 			WriteKey:     writeKey,
-			ClientConnID: []uint8{1, 2, 3, 4},
-			ServerConnID: []uint8{5, 6, 7, 8},
+			ClientConnID: []uint8{1, 2, 3, 5, 7},
+			ServerConnID: []uint8{5, 6, 7, 9, 10},
 		})
 		util.Check(err)
 
