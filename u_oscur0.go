@@ -37,7 +37,7 @@ func Oscur0Client(pconn net.PacketConn, addr net.Addr, oscur0Conf *Oscur0Config)
 	return econn, nil
 }
 
-// var baseServerMap map[string]*baseServer = map[string]*baseServer{}
+var baseServerMap map[string]*baseServer = map[string]*baseServer{}
 
 func Oscur0Server(pconn net.PacketConn, addr net.Addr, oscur0Conf *Oscur0Config) (Connection, error) {
 	keyLogWriter, err := os.Create("./server_keylog.txt")
@@ -50,17 +50,17 @@ func Oscur0Server(pconn net.PacketConn, addr net.Addr, oscur0Conf *Oscur0Config)
 		ConnectionIDLength: len(oscur0Conf.ClientConnID),
 	}
 
-	// server, ok := baseServerMap[pconn.LocalAddr().String()]
-	// if !ok {
-	server, err := tp.createServer(&tls.Config{
-		NextProtos:   []string{"h3"},
-		KeyLogWriter: keyLogWriter,
-	}, &Config{}, true)
-	if err != nil {
-		return nil, err
+	server, ok := baseServerMap[pconn.LocalAddr().String()]
+	if !ok {
+		server, err = tp.createServer(&tls.Config{
+			NextProtos:   []string{"h3"},
+			KeyLogWriter: keyLogWriter,
+		}, &Config{}, true)
+		if err != nil {
+			return nil, err
+		}
+		baseServerMap[pconn.LocalAddr().String()] = server
 	}
-	// 	baseServerMap[pconn.LocalAddr().String()] = server
-	// }
 
 	return server.Oscur0Accept(addr, oscur0Conf)
 }
