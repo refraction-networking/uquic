@@ -559,7 +559,7 @@ runLoop:
 // 	return l.baseServer.Oscur0Accept(&net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 6667}, srcCID, dstCID)
 // }
 
-func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, oscur0Conf *Oscur0Config) (quicConn, error) {
+func (tp *Transport) Oscur0Accept(remoteAddr net.Addr, tlsConf *tls.Config, quicConf *Config, oscur0Conf *Oscur0Config) (quicConn, error) {
 	SrcConnectionID := ConnectionIDFromBytes(oscur0Conf.ClientConnID)
 	DestConnectionID := ConnectionIDFromBytes(oscur0Conf.ServerConnID)
 
@@ -624,8 +624,6 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, oscur0Conf *Oscur0Config)
 	// 	return nil
 	// }
 
-	config := s.config
-
 	var conn quicConn
 	tracingID := nextConnTracingID()
 
@@ -637,49 +635,67 @@ func (s *baseServer) Oscur0Accept(remoteAddr net.Addr, oscur0Conf *Oscur0Config)
 	// s.logger.Debugf("Changing connection ID to %s.", connID)
 
 	var tracer *logging.ConnectionTracer
-	if config.Tracer != nil {
+	if quicConf.Tracer != nil {
 		// // Use the same connection ID that is passed to the client's GetLogWriter callback.
 		// connID := hdr.DestConnectionID
 		// if origDestConnID.Len() > 0 {
 		// 	connID = origDestConnID
 		// }
-		tracer = config.Tracer(context.WithValue(context.Background(), ConnectionTracingKey, tracingID), protocol.PerspectiveServer, SrcConnectionID)
+		tracer = quicConf.Tracer(context.WithValue(context.Background(), ConnectionTracingKey, tracingID), protocol.PerspectiveServer, SrcConnectionID)
 	}
-	conn = s.newConn(
-		newSendConn(s.conn, remoteAddr, packetInfo{}, s.logger),
-		s.connHandler,
+	logger := utils.DefaultLogger.WithPrefix("server")
+	if err := validateConfig(quicConf); err != nil {
+		return nil, err
+	}
+	quicConf = populateConfig(quicConf)
+
+	tp.isSingleUse = true
+	if err := tp.init(tp.isSingleUse); err != nil {
+		return nil, err
+	}
+	// var onClose func()
+	// if t.isSingleUse {
+	// 	onClose = func() { t.Close() }
+	// }
+	tlsConf = tlsConf.Clone()
+	tlsConf.MinVersion = tls.VersionTLS13
+	// setTLSConfigServerName(tlsConf, addr, host)
+
+	conn = newConnection(
+		newSendConn(tp.conn, remoteAddr, packetInfo{}, logger),
+		tp.handlerMap,
 		DestConnectionID,
 		&SrcConnectionID,
 		DestConnectionID,
 		SrcConnectionID,
 		SrcConnectionID,
-		s.connIDGenerator,
-		s.connHandler.GetStatelessResetToken(SrcConnectionID),
-		config,
-		s.tlsConf,
-		s.tokenGenerator,
+		tp.connIDGenerator,
+		tp.handlerMap.GetStatelessResetToken(SrcConnectionID),
+		quicConf,
+		tlsConf,
+		handshake.NewTokenGenerator(*tp.TokenGeneratorKey),
 		true,
 		tracer,
 		tracingID,
-		s.logger,
+		logger,
 		Version1,
 	)
 	// Adding the connection will fail if the client's chosen Destination Connection ID is already in use.
 	// This is very unlikely: Even if an attacker chooses a connection ID that's already in use,
 	// under normal circumstances the packet would just be routed to that connection.
 	// The only time this collision will occur if we receive the two Initial packets at the same time.
-	if added := s.connHandler.AddWithConnID(DestConnectionID, SrcConnectionID, conn); !added {
-		delete(s.zeroRTTQueues, DestConnectionID)
-		conn.closeWithTransportError(qerr.ConnectionRefused)
+	if added := tp.handlerMap.AddWithConnID(DestConnectionID, SrcConnectionID, conn); !added {
+		// delete(s.zeroRTTQueues, DestConnectionID)
+		// conn.closeWithTransportError(qerr.ConnectionRefused)
 		return nil, fmt.Errorf("dst cid already in use")
 	}
 	// Pass queued 0-RTT to the newly established connection.
-	if q, ok := s.zeroRTTQueues[DestConnectionID]; ok {
-		for _, p := range q.packets {
-			conn.handlePacket(p)
-		}
-		delete(s.zeroRTTQueues, DestConnectionID)
-	}
+	// if q, ok := s.zeroRTTQueues[DestConnectionID]; ok {
+	// 	for _, p := range q.packets {
+	// 		conn.handlePacket(p)
+	// 	}
+	// 	delete(s.zeroRTTQueues, DestConnectionID)
+	// }
 
 	conn.(*connection).handleTransportParameters(&wire.TransportParameters{
 		InitialMaxStreamDataBidiLocal:  protocol.DefaultMaxReceiveStreamFlowControlWindow,
