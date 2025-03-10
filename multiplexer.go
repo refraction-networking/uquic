@@ -31,15 +31,15 @@ type connMultiplexer struct {
 
 var _ multiplexer = &connMultiplexer{}
 
-func getMultiplexer() multiplexer {
-	connMuxerOnce.Do(func() {
-		connMuxer = &connMultiplexer{
-			conns:  make(map[string]indexableConn),
-			logger: utils.DefaultLogger.WithPrefix("muxer"),
-		}
-	})
-	return connMuxer
-}
+// func getMultiplexer() multiplexer {
+// 	connMuxerOnce.Do(func() {
+// 		connMuxer = &connMultiplexer{
+// 			conns:  make(map[string]indexableConn),
+// 			logger: utils.DefaultLogger.WithPrefix("muxer"),
+// 		}
+// 	})
+// 	return connMuxer
+// }
 
 func (m *connMultiplexer) index(addr net.Addr) string {
 	return addr.Network() + " " + addr.String()
