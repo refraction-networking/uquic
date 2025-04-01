@@ -5,86 +5,75 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"testing"
+	"time"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
 	quic "github.com/refraction-networking/uquic"
 	"github.com/refraction-networking/uquic/qlog"
+
+	"github.com/stretchr/testify/require"
 )
 
-var _ = Describe("qlog dir tests", Serial, func() {
-	var originalQlogDirValue string
-	var tempTestDirPath string
+func TestQlogDirEnvironmentVariable(t *testing.T) {
+	tempDir := t.TempDir()
+	qlogDir := path.Join(tempDir, "qlogs")
+	t.Setenv("QLOGDIR", qlogDir)
 
-	BeforeEach(func() {
-		originalQlogDirValue = os.Getenv("QLOGDIR")
-		var err error
-		tempTestDirPath, err = os.MkdirTemp("", "temp_test_dir")
-		Expect(err).ToNot(HaveOccurred())
-	})
+	serverStopped := make(chan struct{})
+	server, err := quic.Listen(
+		newUPDConnLocalhost(t),
+		getTLSConfig(),
+		&quic.Config{
+			Tracer: qlog.DefaultConnectionTracer,
+		},
+	)
+	require.NoError(t, err)
 
-	AfterEach(func() {
-		err := os.Setenv("QLOGDIR", originalQlogDirValue)
-		Expect(err).ToNot(HaveOccurred())
-		err = os.RemoveAll(tempTestDirPath)
-		Expect(err).ToNot(HaveOccurred())
-	})
-
-	handshake := func() {
-		serverStopped := make(chan struct{})
-		server, err := quic.ListenAddr(
-			"localhost:0",
-			getTLSConfig(),
-			&quic.Config{
-				Tracer: qlog.DefaultTracer,
-			},
-		)
-		Expect(err).ToNot(HaveOccurred())
-
-		go func() {
-			defer GinkgoRecover()
-			defer close(serverStopped)
-			for {
-				if _, err := server.Accept(context.Background()); err != nil {
-					return
-				}
+	go func() {
+		defer close(serverStopped)
+		for {
+			if _, err := server.Accept(context.Background()); err != nil {
+				return
 			}
-		}()
+		}
+	}()
 
-		conn, err := quic.DialAddr(
-			context.Background(),
-			server.Addr().String(),
-			getTLSClientConfig(),
-			&quic.Config{
-				Tracer: qlog.DefaultTracer,
-			},
-		)
-		Expect(err).ToNot(HaveOccurred())
-		conn.CloseWithError(0, "")
-		server.Close()
-		<-serverStopped
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := quic.Dial(
+		ctx,
+		newUPDConnLocalhost(t),
+		server.Addr(),
+		getTLSClientConfig(),
+		&quic.Config{
+			Tracer: qlog.DefaultConnectionTracer,
+		},
+	)
+	require.NoError(t, err)
+	conn.CloseWithError(0, "")
+	server.Close()
+	<-serverStopped
+
+	_, err = os.Stat(qlogDir)
+	qlogDirCreated := !os.IsNotExist(err)
+	require.True(t, qlogDirCreated)
+
+	childs, err := os.ReadDir(qlogDir)
+	require.NoError(t, err)
+	require.Len(t, childs, 2)
+
+	odcids := make([]string, 0, 2)
+	vantagePoints := make([]string, 0, 2)
+	qlogFileNameRegexp := regexp.MustCompile(`^([0-f]+)_(client|server).sqlog$`)
+
+	for _, child := range childs {
+		matches := qlogFileNameRegexp.FindStringSubmatch(child.Name())
+		require.Len(t, matches, 3)
+		odcids = append(odcids, matches[1])
+		vantagePoints = append(vantagePoints, matches[2])
 	}
 
-	It("environment variable is set", func() {
-		qlogDir := path.Join(tempTestDirPath, "qlogs")
-		err := os.Setenv("QLOGDIR", qlogDir)
-		Expect(err).ToNot(HaveOccurred())
-		handshake()
-		_, err = os.Stat(tempTestDirPath)
-		qlogDirCreated := !os.IsNotExist(err)
-		Expect(qlogDirCreated).To(BeTrue())
-		childs, err := os.ReadDir(qlogDir)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(len(childs)).To(Equal(2))
-		odcids := make([]string, 0)
-		vantagePoints := make([]string, 0)
-		qlogFileNameRegexp := regexp.MustCompile(`^([0-f]+)_(client|server).qlog$`)
-		for _, child := range childs {
-			matches := qlogFileNameRegexp.FindStringSubmatch(child.Name())
-			odcids = append(odcids, matches[1])
-			vantagePoints = append(vantagePoints, matches[2])
-		}
-		Expect(odcids[0]).To(Equal(odcids[1]))
-		Expect(vantagePoints).To(ContainElements("client", "server"))
-	})
-})
+	require.Equal(t, odcids[0], odcids[1])
+	require.Contains(t, vantagePoints, "client")
+	require.Contains(t, vantagePoints, "server")
+}

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/refraction-networking/uquic/internal/protocol"
+	quic "github.com/refraction-networking/uquic"
 	"github.com/refraction-networking/uquic/quicvarint"
 )
 
@@ -19,13 +19,19 @@ type frame interface{}
 
 var errHijacked = errors.New("hijacked")
 
-func parseNextFrame(r io.Reader, unknownFrameHandler unknownFrameHandlerFunc) (frame, error) {
-	qr := quicvarint.NewReader(r)
+type frameParser struct {
+	r                   io.Reader
+	conn                quic.Connection
+	unknownFrameHandler unknownFrameHandlerFunc
+}
+
+func (p *frameParser) ParseNext() (frame, error) {
+	qr := quicvarint.NewReader(p.r)
 	for {
 		t, err := quicvarint.Read(qr)
 		if err != nil {
-			if unknownFrameHandler != nil {
-				hijacked, err := unknownFrameHandler(0, err)
+			if p.unknownFrameHandler != nil {
+				hijacked, err := p.unknownFrameHandler(0, err)
 				if err != nil {
 					return nil, err
 				}
@@ -36,8 +42,8 @@ func parseNextFrame(r io.Reader, unknownFrameHandler unknownFrameHandlerFunc) (f
 			return nil, err
 		}
 		// Call the unknownFrameHandler for frames not defined in the HTTP/3 spec
-		if t > 0xd && unknownFrameHandler != nil {
-			hijacked, err := unknownFrameHandler(FrameType(t), nil)
+		if t > 0xd && p.unknownFrameHandler != nil {
+			hijacked, err := p.unknownFrameHandler(FrameType(t), nil)
 			if err != nil {
 				return nil, err
 			}
@@ -57,11 +63,15 @@ func parseNextFrame(r io.Reader, unknownFrameHandler unknownFrameHandlerFunc) (f
 		case 0x1:
 			return &headersFrame{Length: l}, nil
 		case 0x4:
-			return parseSettingsFrame(r, l)
+			return parseSettingsFrame(p.r, l)
 		case 0x3: // CANCEL_PUSH
 		case 0x5: // PUSH_PROMISE
-		case 0x7: // GOAWAY
+		case 0x7:
+			return parseGoAwayFrame(qr, l)
 		case 0xd: // MAX_PUSH_ID
+		case 0x2, 0x6, 0x8, 0x9:
+			p.conn.CloseWithError(quic.ApplicationErrorCode(ErrCodeFrameUnexpected), "")
+			return nil, fmt.Errorf("http3: reserved frame type: %d", t)
 		}
 		// skip over unknown frames
 		if _, err := io.CopyN(io.Discard, qr, int64(l)); err != nil {
@@ -160,7 +170,7 @@ func parseSettingsFrame(r io.Reader, l uint64) (*settingsFrame, error) {
 
 func (f *settingsFrame) Append(b []byte) []byte {
 	b = quicvarint.Append(b, 0x4)
-	var l protocol.ByteCount
+	var l int
 	for id, val := range f.Other {
 		l += quicvarint.Len(id) + quicvarint.Len(val)
 	}
@@ -184,4 +194,28 @@ func (f *settingsFrame) Append(b []byte) []byte {
 		b = quicvarint.Append(b, val)
 	}
 	return b
+}
+
+type goAwayFrame struct {
+	StreamID quic.StreamID
+}
+
+func parseGoAwayFrame(r io.ByteReader, l uint64) (*goAwayFrame, error) {
+	frame := &goAwayFrame{}
+	cbr := countingByteReader{ByteReader: r}
+	id, err := quicvarint.Read(&cbr)
+	if err != nil {
+		return nil, err
+	}
+	if cbr.Read != int(l) {
+		return nil, errors.New("GOAWAY frame: inconsistent length")
+	}
+	frame.StreamID = quic.StreamID(id)
+	return frame, nil
+}
+
+func (f *goAwayFrame) Append(b []byte) []byte {
+	b = quicvarint.Append(b, 0x7)
+	b = quicvarint.Append(b, uint64(quicvarint.Len(uint64(f.StreamID))))
+	return quicvarint.Append(b, uint64(f.StreamID))
 }

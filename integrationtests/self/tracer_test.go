@@ -7,35 +7,41 @@ import (
 	"fmt"
 	"io"
 	mrand "math/rand"
-	"net"
+	"sync"
+	"testing"
+	"time"
 
 	quic "github.com/refraction-networking/uquic"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/utils"
 	"github.com/refraction-networking/uquic/logging"
+	"github.com/refraction-networking/uquic/metrics"
 	"github.com/refraction-networking/uquic/qlog"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
 )
 
-var _ = Describe("Tracer tests", func() {
+func TestTracerHandshake(t *testing.T) {
 	addTracers := func(pers protocol.Perspective, conf *quic.Config) *quic.Config {
-		enableQlog := mrand.Int()%3 != 0
-		enableCustomTracer := mrand.Int()%3 != 0
+		enableQlog := mrand.Int()%2 != 0
+		enableMetrics := mrand.Int()%2 != 0
+		enableCustomTracer := mrand.Int()%2 != 0
 
-		fmt.Fprintf(GinkgoWriter, "%s using qlog: %t, custom: %t\n", pers, enableQlog, enableCustomTracer)
+		t.Logf("%s using qlog: %t, metrics: %t, custom: %t", pers, enableQlog, enableMetrics, enableCustomTracer)
 
 		var tracerConstructors []func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer
 		if enableQlog {
 			tracerConstructors = append(tracerConstructors, func(_ context.Context, p logging.Perspective, connID quic.ConnectionID) *logging.ConnectionTracer {
 				if mrand.Int()%2 == 0 { // simulate that a qlog collector might only want to log some connections
-					fmt.Fprintf(GinkgoWriter, "%s qlog tracer deciding to not trace connection %s\n", p, connID)
+					t.Logf("%s qlog tracer deciding to not trace connection %s", p, connID)
 					return nil
 				}
-				fmt.Fprintf(GinkgoWriter, "%s qlog tracing connection %s\n", p, connID)
+				t.Logf("%s qlog tracing connection %s", p, connID)
 				return qlog.NewConnectionTracer(utils.NewBufferedWriteCloser(bufio.NewWriter(&bytes.Buffer{}), io.NopCloser(nil)), p, connID)
 			})
+		}
+		if enableMetrics {
+			tracerConstructors = append(tracerConstructors, metrics.DefaultConnectionTracer)
 		}
 		if enableCustomTracer {
 			tracerConstructors = append(tracerConstructors, func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer {
@@ -56,44 +62,47 @@ var _ = Describe("Tracer tests", func() {
 	}
 
 	for i := 0; i < 3; i++ {
-		It("handshakes with a random combination of tracers", func() {
+		t.Run(fmt.Sprintf("run %d", i+1), func(t *testing.T) {
 			if enableQlog {
-				Skip("This test sets tracers and won't produce any qlogs.")
+				t.Skip("This test sets tracers and won't produce any qlogs.")
 			}
+
 			quicClientConf := addTracers(protocol.PerspectiveClient, getQuicConfig(nil))
 			quicServerConf := addTracers(protocol.PerspectiveServer, getQuicConfig(nil))
 
-			serverChan := make(chan *quic.Listener)
-			go func() {
-				defer GinkgoRecover()
-				ln, err := quic.ListenAddr("localhost:0", getTLSConfig(), quicServerConf)
-				Expect(err).ToNot(HaveOccurred())
-				serverChan <- ln
-				conn, err := ln.Accept(context.Background())
-				Expect(err).ToNot(HaveOccurred())
-				str, err := conn.OpenUniStream()
-				Expect(err).ToNot(HaveOccurred())
-				_, err = str.Write(PRData)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(str.Close()).To(Succeed())
-			}()
+			ln, err := quic.Listen(newUPDConnLocalhost(t), getTLSConfig(), quicServerConf)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, ln.Close()) })
 
-			ln := <-serverChan
-			defer ln.Close()
+			var wg sync.WaitGroup
+			for j := 0; j < 3; j++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+					defer cancel()
+					conn, err := quic.Dial(ctx, newUPDConnLocalhost(t), ln.Addr(), getTLSClientConfig(), quicClientConf)
+					require.NoError(t, err)
+					defer conn.CloseWithError(0, "")
 
-			conn, err := quic.DialAddr(
-				context.Background(),
-				fmt.Sprintf("localhost:%d", ln.Addr().(*net.UDPAddr).Port),
-				getTLSClientConfig(),
-				quicClientConf,
-			)
-			Expect(err).ToNot(HaveOccurred())
-			defer conn.CloseWithError(0, "")
-			str, err := conn.AcceptUniStream(context.Background())
-			Expect(err).ToNot(HaveOccurred())
-			data, err := io.ReadAll(str)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(data).To(Equal(PRData))
+					sconn, err := ln.Accept(ctx)
+					if err != nil {
+						return
+					}
+					sstr, err := sconn.OpenUniStream()
+					require.NoError(t, err)
+					_, err = sstr.Write(PRData)
+					require.NoError(t, err)
+					require.NoError(t, sstr.Close())
+
+					str, err := conn.AcceptUniStream(ctx)
+					require.NoError(t, err)
+					data, err := io.ReadAll(str)
+					require.NoError(t, err)
+					require.Equal(t, PRData, data)
+				}()
+			}
+			wg.Wait()
 		})
 	}
-})
+}

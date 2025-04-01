@@ -1,167 +1,140 @@
 package utils
 
 import (
+	"testing"
 	"time"
 
 	"github.com/refraction-networking/uquic/internal/protocol"
-
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
 )
 
-var _ = Describe("RTT stats", func() {
-	var rttStats *RTTStats
+func TestRTTStatsDefaults(t *testing.T) {
+	var rttStats RTTStats
+	require.Zero(t, rttStats.MinRTT())
+	require.Zero(t, rttStats.SmoothedRTT())
+}
 
-	BeforeEach(func() {
-		rttStats = NewRTTStats()
-	})
+func TestRTTStatsSmoothedRTT(t *testing.T) {
+	var rttStats RTTStats
+	// verify that ack_delay is ignored in the first measurement
+	rttStats.UpdateRTT(300*time.Millisecond, 100*time.Millisecond)
+	require.Equal(t, 300*time.Millisecond, rttStats.LatestRTT())
+	require.Equal(t, 300*time.Millisecond, rttStats.SmoothedRTT())
+	// verify that smoothed RTT includes max ack delay if it's reasonable
+	rttStats.UpdateRTT(350*time.Millisecond, 50*time.Millisecond)
+	require.Equal(t, 300*time.Millisecond, rttStats.LatestRTT())
+	require.Equal(t, 300*time.Millisecond, rttStats.SmoothedRTT())
+	// verify that large erroneous ack_delay does not change smoothed RTT
+	rttStats.UpdateRTT(200*time.Millisecond, 300*time.Millisecond)
+	require.Equal(t, 200*time.Millisecond, rttStats.LatestRTT())
+	require.Equal(t, 287500*time.Microsecond, rttStats.SmoothedRTT())
+}
 
-	It("DefaultsBeforeUpdate", func() {
-		Expect(rttStats.MinRTT()).To(Equal(time.Duration(0)))
-		Expect(rttStats.SmoothedRTT()).To(Equal(time.Duration(0)))
-	})
+func TestRTTStatsMinRTT(t *testing.T) {
+	var rttStats RTTStats
+	rttStats.UpdateRTT(200*time.Millisecond, 0)
+	require.Equal(t, 200*time.Millisecond, rttStats.MinRTT())
+	rttStats.UpdateRTT(10*time.Millisecond, 0)
+	require.Equal(t, 10*time.Millisecond, rttStats.MinRTT())
+	rttStats.UpdateRTT(50*time.Millisecond, 0)
+	require.Equal(t, 10*time.Millisecond, rttStats.MinRTT())
+	rttStats.UpdateRTT(50*time.Millisecond, 0)
+	require.Equal(t, 10*time.Millisecond, rttStats.MinRTT())
+	rttStats.UpdateRTT(50*time.Millisecond, 0)
+	require.Equal(t, 10*time.Millisecond, rttStats.MinRTT())
+	// verify that ack_delay does not go into recording of MinRTT
+	rttStats.UpdateRTT(7*time.Millisecond, 2*time.Millisecond)
+	require.Equal(t, 7*time.Millisecond, rttStats.MinRTT())
+}
 
-	It("SmoothedRTT", func() {
-		// Verify that ack_delay is ignored in the first measurement.
-		rttStats.UpdateRTT((300 * time.Millisecond), (100 * time.Millisecond), time.Time{})
-		Expect(rttStats.LatestRTT()).To(Equal((300 * time.Millisecond)))
-		Expect(rttStats.SmoothedRTT()).To(Equal((300 * time.Millisecond)))
-		// Verify that Smoothed RTT includes max ack delay if it's reasonable.
-		rttStats.UpdateRTT((350 * time.Millisecond), (50 * time.Millisecond), time.Time{})
-		Expect(rttStats.LatestRTT()).To(Equal((300 * time.Millisecond)))
-		Expect(rttStats.SmoothedRTT()).To(Equal((300 * time.Millisecond)))
-		// Verify that large erroneous ack_delay does not change Smoothed RTT.
-		rttStats.UpdateRTT((200 * time.Millisecond), (300 * time.Millisecond), time.Time{})
-		Expect(rttStats.LatestRTT()).To(Equal((200 * time.Millisecond)))
-		Expect(rttStats.SmoothedRTT()).To(Equal((287500 * time.Microsecond)))
-	})
+func TestRTTStatsMaxAckDelay(t *testing.T) {
+	var rttStats RTTStats
+	rttStats.SetMaxAckDelay(42 * time.Minute)
+	require.Equal(t, 42*time.Minute, rttStats.MaxAckDelay())
+}
 
-	It("MinRTT", func() {
-		rttStats.UpdateRTT((200 * time.Millisecond), 0, time.Time{})
-		Expect(rttStats.MinRTT()).To(Equal((200 * time.Millisecond)))
-		rttStats.UpdateRTT((10 * time.Millisecond), 0, time.Time{}.Add((10 * time.Millisecond)))
-		Expect(rttStats.MinRTT()).To(Equal((10 * time.Millisecond)))
-		rttStats.UpdateRTT((50 * time.Millisecond), 0, time.Time{}.Add((20 * time.Millisecond)))
-		Expect(rttStats.MinRTT()).To(Equal((10 * time.Millisecond)))
-		rttStats.UpdateRTT((50 * time.Millisecond), 0, time.Time{}.Add((30 * time.Millisecond)))
-		Expect(rttStats.MinRTT()).To(Equal((10 * time.Millisecond)))
-		rttStats.UpdateRTT((50 * time.Millisecond), 0, time.Time{}.Add((40 * time.Millisecond)))
-		Expect(rttStats.MinRTT()).To(Equal((10 * time.Millisecond)))
-		// Verify that ack_delay does not go into recording of MinRTT_.
-		rttStats.UpdateRTT((7 * time.Millisecond), (2 * time.Millisecond), time.Time{}.Add((50 * time.Millisecond)))
-		Expect(rttStats.MinRTT()).To(Equal((7 * time.Millisecond)))
-	})
+func TestRTTStatsComputePTO(t *testing.T) {
+	const (
+		maxAckDelay = 42 * time.Minute
+		rtt         = time.Second
+	)
+	var rttStats RTTStats
+	rttStats.SetMaxAckDelay(maxAckDelay)
+	rttStats.UpdateRTT(rtt, 0)
+	require.Equal(t, rtt, rttStats.SmoothedRTT())
+	require.Equal(t, rtt/2, rttStats.MeanDeviation())
+	require.Equal(t, rtt+4*(rtt/2), rttStats.PTO(false))
+	require.Equal(t, rtt+4*(rtt/2)+maxAckDelay, rttStats.PTO(true))
+}
 
-	It("MaxAckDelay", func() {
-		rttStats.SetMaxAckDelay(42 * time.Minute)
-		Expect(rttStats.MaxAckDelay()).To(Equal(42 * time.Minute))
-	})
+func TestRTTStatsPTOWithShortRTT(t *testing.T) {
+	const rtt = time.Microsecond
+	var rttStats RTTStats
+	rttStats.UpdateRTT(rtt, 0)
+	require.Equal(t, rtt+protocol.TimerGranularity, rttStats.PTO(true))
+}
 
-	It("computes the PTO", func() {
-		maxAckDelay := 42 * time.Minute
-		rttStats.SetMaxAckDelay(maxAckDelay)
-		rtt := time.Second
-		rttStats.UpdateRTT(rtt, 0, time.Time{})
-		Expect(rttStats.SmoothedRTT()).To(Equal(rtt))
-		Expect(rttStats.MeanDeviation()).To(Equal(rtt / 2))
-		Expect(rttStats.PTO(false)).To(Equal(rtt + 4*(rtt/2)))
-		Expect(rttStats.PTO(true)).To(Equal(rtt + 4*(rtt/2) + maxAckDelay))
-	})
+func TestRTTStatsUpdateWithBadSendDeltas(t *testing.T) {
+	var rttStats RTTStats
+	const initialRtt = 10 * time.Millisecond
+	rttStats.UpdateRTT(initialRtt, 0)
+	require.Equal(t, initialRtt, rttStats.MinRTT())
+	require.Equal(t, initialRtt, rttStats.SmoothedRTT())
 
-	It("uses the granularity for computing the PTO for short RTTs", func() {
-		rtt := time.Microsecond
-		rttStats.UpdateRTT(rtt, 0, time.Time{})
-		Expect(rttStats.PTO(true)).To(Equal(rtt + protocol.TimerGranularity))
-	})
+	badSendDeltas := []time.Duration{
+		0,
+		-1000 * time.Microsecond,
+	}
 
-	It("ExpireSmoothedMetrics", func() {
-		initialRtt := (10 * time.Millisecond)
-		rttStats.UpdateRTT(initialRtt, 0, time.Time{})
-		Expect(rttStats.MinRTT()).To(Equal(initialRtt))
-		Expect(rttStats.SmoothedRTT()).To(Equal(initialRtt))
+	for _, badSendDelta := range badSendDeltas {
+		rttStats.UpdateRTT(badSendDelta, 0)
+		require.Equal(t, initialRtt, rttStats.MinRTT())
+		require.Equal(t, initialRtt, rttStats.SmoothedRTT())
+	}
+}
 
-		Expect(rttStats.MeanDeviation()).To(Equal(initialRtt / 2))
+func TestRTTStatsRestore(t *testing.T) {
+	var rttStats RTTStats
+	rttStats.SetInitialRTT(10 * time.Second)
+	require.Equal(t, 10*time.Second, rttStats.LatestRTT())
+	require.Equal(t, 10*time.Second, rttStats.SmoothedRTT())
+	require.Zero(t, rttStats.MeanDeviation())
+	// update the RTT and make sure that the initial value is immediately forgotten
+	rttStats.UpdateRTT(200*time.Millisecond, 0)
+	require.Equal(t, 200*time.Millisecond, rttStats.LatestRTT())
+	require.Equal(t, 200*time.Millisecond, rttStats.SmoothedRTT())
+	require.Equal(t, 100*time.Millisecond, rttStats.MeanDeviation())
+}
 
-		// Update once with a 20ms RTT.
-		doubledRtt := initialRtt * (2)
-		rttStats.UpdateRTT(doubledRtt, 0, time.Time{})
-		Expect(rttStats.SmoothedRTT()).To(Equal(time.Duration(float32(initialRtt) * 1.125)))
+func TestRTTMeasurementAfterRestore(t *testing.T) {
+	var rttStats RTTStats
+	const rtt = 10 * time.Millisecond
+	rttStats.UpdateRTT(rtt, 0)
+	require.Equal(t, rtt, rttStats.LatestRTT())
+	require.Equal(t, rtt, rttStats.SmoothedRTT())
+	rttStats.SetInitialRTT(time.Minute)
+	require.Equal(t, rtt, rttStats.LatestRTT())
+	require.Equal(t, rtt, rttStats.SmoothedRTT())
+}
 
-		// Expire the smoothed metrics, increasing smoothed rtt and mean deviation.
-		rttStats.ExpireSmoothedMetrics()
-		Expect(rttStats.SmoothedRTT()).To(Equal(doubledRtt))
-		Expect(rttStats.MeanDeviation()).To(Equal(time.Duration(float32(initialRtt) * 0.875)))
+func TestRTTStatsResetForPathMigration(t *testing.T) {
+	var rttStats RTTStats
+	rttStats.SetMaxAckDelay(42 * time.Millisecond)
+	rttStats.UpdateRTT(time.Second, 0)
+	rttStats.UpdateRTT(10*time.Second, 0)
+	require.Equal(t, time.Second, rttStats.MinRTT())
+	require.Equal(t, 10*time.Second, rttStats.LatestRTT())
+	require.NotZero(t, rttStats.SmoothedRTT())
 
-		// Now go back down to 5ms and expire the smoothed metrics, and ensure the
-		// mean deviation increases to 15ms.
-		halfRtt := initialRtt / 2
-		rttStats.UpdateRTT(halfRtt, 0, time.Time{})
-		Expect(doubledRtt).To(BeNumerically(">", rttStats.SmoothedRTT()))
-		Expect(initialRtt).To(BeNumerically("<", rttStats.MeanDeviation()))
-	})
+	rttStats.ResetForPathMigration()
+	require.Zero(t, rttStats.MinRTT())
+	require.Zero(t, rttStats.LatestRTT())
+	require.Zero(t, rttStats.SmoothedRTT())
+	require.Equal(t, 2*defaultInitialRTT, rttStats.PTO(false))
+	// make sure that max_ack_delay was not reset
+	require.Equal(t, 42*time.Millisecond, rttStats.MaxAckDelay())
 
-	It("UpdateRTTWithBadSendDeltas", func() {
-		// Make sure we ignore bad RTTs.
-		// base::test::MockLog log;
-
-		initialRtt := (10 * time.Millisecond)
-		rttStats.UpdateRTT(initialRtt, 0, time.Time{})
-		Expect(rttStats.MinRTT()).To(Equal(initialRtt))
-		Expect(rttStats.SmoothedRTT()).To(Equal(initialRtt))
-
-		badSendDeltas := []time.Duration{
-			0,
-			InfDuration,
-			-1000 * time.Microsecond,
-		}
-		// log.StartCapturingLogs();
-
-		for _, badSendDelta := range badSendDeltas {
-			// SCOPED_TRACE(Message() << "bad_send_delta = "
-			//  << bad_send_delta.ToMicroseconds());
-			// EXPECT_CALL(log, Log(LOG_WARNING, _, _, _, HasSubstr("Ignoring")));
-			rttStats.UpdateRTT(badSendDelta, 0, time.Time{})
-			Expect(rttStats.MinRTT()).To(Equal(initialRtt))
-			Expect(rttStats.SmoothedRTT()).To(Equal(initialRtt))
-		}
-	})
-
-	It("ResetAfterConnectionMigrations", func() {
-		rttStats.UpdateRTT(200*time.Millisecond, 0, time.Time{})
-		Expect(rttStats.LatestRTT()).To(Equal((200 * time.Millisecond)))
-		Expect(rttStats.SmoothedRTT()).To(Equal((200 * time.Millisecond)))
-		Expect(rttStats.MinRTT()).To(Equal((200 * time.Millisecond)))
-		rttStats.UpdateRTT((300 * time.Millisecond), (100 * time.Millisecond), time.Time{})
-		Expect(rttStats.LatestRTT()).To(Equal((200 * time.Millisecond)))
-		Expect(rttStats.SmoothedRTT()).To(Equal((200 * time.Millisecond)))
-		Expect(rttStats.MinRTT()).To(Equal((200 * time.Millisecond)))
-
-		// Reset rtt stats on connection migrations.
-		rttStats.OnConnectionMigration()
-		Expect(rttStats.LatestRTT()).To(Equal(time.Duration(0)))
-		Expect(rttStats.SmoothedRTT()).To(Equal(time.Duration(0)))
-		Expect(rttStats.MinRTT()).To(Equal(time.Duration(0)))
-	})
-
-	It("restores the RTT", func() {
-		rttStats.SetInitialRTT(10 * time.Second)
-		Expect(rttStats.LatestRTT()).To(Equal(10 * time.Second))
-		Expect(rttStats.SmoothedRTT()).To(Equal(10 * time.Second))
-		Expect(rttStats.MeanDeviation()).To(BeZero())
-		// update the RTT and make sure that the initial value is immediately forgotten
-		rttStats.UpdateRTT(200*time.Millisecond, 0, time.Time{})
-		Expect(rttStats.LatestRTT()).To(Equal(200 * time.Millisecond))
-		Expect(rttStats.SmoothedRTT()).To(Equal(200 * time.Millisecond))
-		Expect(rttStats.MeanDeviation()).To(Equal(100 * time.Millisecond))
-	})
-
-	It("doesn't restore the RTT if we already have a measurement", func() {
-		const rtt = 10 * time.Millisecond
-		rttStats.UpdateRTT(rtt, 0, time.Now())
-		Expect(rttStats.LatestRTT()).To(Equal(rtt))
-		Expect(rttStats.SmoothedRTT()).To(Equal(rtt))
-		rttStats.SetInitialRTT(time.Minute)
-		Expect(rttStats.LatestRTT()).To(Equal(rtt))
-		Expect(rttStats.SmoothedRTT()).To(Equal(rtt))
-	})
-})
+	rttStats.UpdateRTT(10*time.Millisecond, 0)
+	require.Equal(t, 10*time.Millisecond, rttStats.SmoothedRTT())
+	require.Equal(t, 10*time.Millisecond, rttStats.LatestRTT())
+}

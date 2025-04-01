@@ -25,7 +25,7 @@ func (c *mockClock) Advance(d time.Duration) {
 	*c = mockClock(time.Time(*c).Add(d))
 }
 
-const MaxCongestionWindow protocol.ByteCount = 200 * maxDatagramSize
+const MaxCongestionWindow = 200 * maxDatagramSize
 
 var _ = Describe("Cubic Sender", func() {
 	var (
@@ -34,7 +34,7 @@ var _ = Describe("Cubic Sender", func() {
 		bytesInFlight     protocol.ByteCount
 		packetNumber      protocol.PacketNumber
 		ackedPacketNumber protocol.PacketNumber
-		rttStats          *utils.RTTStats
+		rttStats          utils.RTTStats
 	)
 
 	BeforeEach(func() {
@@ -42,12 +42,12 @@ var _ = Describe("Cubic Sender", func() {
 		packetNumber = 1
 		ackedPacketNumber = 0
 		clock = mockClock{}
-		rttStats = utils.NewRTTStats()
+		rttStats = utils.RTTStats{}
 		sender = newCubicSender(
 			&clock,
-			rttStats,
+			&rttStats,
 			true, /*reno*/
-			protocol.InitialPacketSizeIPv4,
+			protocol.InitialPacketSize,
 			initialCongestionWindowPackets*maxDatagramSize,
 			MaxCongestionWindow,
 			nil,
@@ -67,7 +67,7 @@ var _ = Describe("Cubic Sender", func() {
 
 	// Normal is that TCP acks every other segment.
 	AckNPackets := func(n int) {
-		rttStats.UpdateRTT(60*time.Millisecond, 0, clock.Now())
+		rttStats.UpdateRTT(60*time.Millisecond, 0)
 		sender.MaybeExitSlowStart()
 		for i := 0; i < n; i++ {
 			ackedPacketNumber++
@@ -109,14 +109,14 @@ var _ = Describe("Cubic Sender", func() {
 	})
 
 	It("paces", func() {
-		rttStats.UpdateRTT(10*time.Millisecond, 0, time.Now())
+		rttStats.UpdateRTT(10*time.Millisecond, 0)
 		clock.Advance(time.Hour)
 		// Fill the send window with data, then verify that we can't send.
 		SendAvailableSendWindow()
 		AckNPackets(1)
 		delay := sender.TimeUntilSend(bytesInFlight)
 		Expect(delay).ToNot(BeZero())
-		Expect(delay).ToNot(Equal(utils.InfDuration))
+		Expect(delay.Sub(clock.Now())).To(BeNumerically("<", time.Hour))
 	})
 
 	It("application limited slow start", func() {
@@ -319,7 +319,7 @@ var _ = Describe("Cubic Sender", func() {
 	It("tcp cubic reset epoch on quiescence", func() {
 		const maxCongestionWindow = 50
 		const maxCongestionWindowBytes = maxCongestionWindow * maxDatagramSize
-		sender = newCubicSender(&clock, rttStats, false, protocol.InitialPacketSizeIPv4, initialCongestionWindowPackets*maxDatagramSize, maxCongestionWindowBytes, nil)
+		sender = newCubicSender(&clock, &rttStats, false, protocol.InitialPacketSize, initialCongestionWindowPackets*maxDatagramSize, maxCongestionWindowBytes, nil)
 
 		numSent := SendAvailableSendWindow()
 
@@ -460,7 +460,7 @@ var _ = Describe("Cubic Sender", func() {
 
 	It("slow starts up to the maximum congestion window", func() {
 		const initialMaxCongestionWindow = protocol.MaxCongestionWindowPackets * initialMaxDatagramSize
-		sender = newCubicSender(&clock, rttStats, true, protocol.InitialPacketSizeIPv4, initialCongestionWindowPackets*maxDatagramSize, initialMaxCongestionWindow, nil)
+		sender = newCubicSender(&clock, &rttStats, true, protocol.InitialPacketSize, initialCongestionWindowPackets*maxDatagramSize, initialMaxCongestionWindow, nil)
 
 		for i := 1; i < protocol.MaxCongestionWindowPackets; i++ {
 			sender.MaybeExitSlowStart()
@@ -475,7 +475,7 @@ var _ = Describe("Cubic Sender", func() {
 
 	It("slow starts up to maximum congestion window, if larger packets are sent", func() {
 		const initialMaxCongestionWindow = protocol.MaxCongestionWindowPackets * initialMaxDatagramSize
-		sender = newCubicSender(&clock, rttStats, true, protocol.InitialPacketSizeIPv4, initialCongestionWindowPackets*maxDatagramSize, initialMaxCongestionWindow, nil)
+		sender = newCubicSender(&clock, &rttStats, true, protocol.InitialPacketSize, initialCongestionWindowPackets*maxDatagramSize, initialMaxCongestionWindow, nil)
 		const packetSize = initialMaxDatagramSize + 100
 		sender.SetMaxDatagramSize(packetSize)
 		for i := 1; i < protocol.MaxCongestionWindowPackets; i++ {
@@ -490,7 +490,7 @@ var _ = Describe("Cubic Sender", func() {
 
 	It("limit cwnd increase in congestion avoidance", func() {
 		// Enable Cubic.
-		sender = newCubicSender(&clock, rttStats, false, protocol.InitialPacketSizeIPv4, initialCongestionWindowPackets*maxDatagramSize, MaxCongestionWindow, nil)
+		sender = newCubicSender(&clock, &rttStats, false, protocol.InitialPacketSize, initialCongestionWindowPackets*maxDatagramSize, MaxCongestionWindow, nil)
 		numSent := SendAvailableSendWindow()
 
 		// Make sure we fall out of slow start.

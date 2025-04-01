@@ -1,55 +1,39 @@
 package wire
 
 import (
-	"bytes"
 	"io"
+	"testing"
 
 	"github.com/refraction-networking/uquic/internal/protocol"
-	"github.com/refraction-networking/uquic/quicvarint"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
 )
 
-var _ = Describe("MAX_DATA frame", func() {
-	Context("when parsing", func() {
-		It("accepts sample frame", func() {
-			data := encodeVarInt(0xdecafbad123456) // byte offset
-			b := bytes.NewReader(data)
-			frame, err := parseMaxDataFrame(b, protocol.Version1)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(frame.MaximumData).To(Equal(protocol.ByteCount(0xdecafbad123456)))
-			Expect(b.Len()).To(BeZero())
-		})
+func TestParseMaxDataFrame(t *testing.T) {
+	data := encodeVarInt(0xdecafbad123456) // byte offset
+	frame, l, err := parseMaxDataFrame(data, protocol.Version1)
+	require.NoError(t, err)
+	require.Equal(t, protocol.ByteCount(0xdecafbad123456), frame.MaximumData)
+	require.Equal(t, len(data), l)
+}
 
-		It("errors on EOFs", func() {
-			data := encodeVarInt(0xdecafbad1234567) // byte offset
-			_, err := parseMaxDataFrame(bytes.NewReader(data), protocol.Version1)
-			Expect(err).NotTo(HaveOccurred())
-			for i := range data {
-				_, err := parseMaxDataFrame(bytes.NewReader(data[:i]), protocol.Version1)
-				Expect(err).To(MatchError(io.EOF))
-			}
-		})
-	})
+func TestParseMaxDataErrorsOnEOFs(t *testing.T) {
+	data := encodeVarInt(0xdecafbad1234567) // byte offset
+	_, l, err := parseMaxDataFrame(data, protocol.Version1)
+	require.NoError(t, err)
+	require.Equal(t, len(data), l)
+	for i := range data {
+		_, _, err := parseMaxDataFrame(data[:i], protocol.Version1)
+		require.Equal(t, io.EOF, err)
+	}
+}
 
-	Context("writing", func() {
-		It("has proper length", func() {
-			f := &MaxDataFrame{
-				MaximumData: 0xdeadbeef,
-			}
-			Expect(f.Length(protocol.Version1)).To(Equal(1 + quicvarint.Len(0xdeadbeef)))
-		})
-
-		It("writes a MAX_DATA frame", func() {
-			f := &MaxDataFrame{
-				MaximumData: 0xdeadbeefcafe,
-			}
-			b, err := f.Append(nil, protocol.Version1)
-			Expect(err).ToNot(HaveOccurred())
-			expected := []byte{maxDataFrameType}
-			expected = append(expected, encodeVarInt(0xdeadbeefcafe)...)
-			Expect(b).To(Equal(expected))
-		})
-	})
-})
+func TestWriteMaxDataFrame(t *testing.T) {
+	f := &MaxDataFrame{MaximumData: 0xdeadbeefcafe}
+	b, err := f.Append(nil, protocol.Version1)
+	require.NoError(t, err)
+	expected := []byte{maxDataFrameType}
+	expected = append(expected, encodeVarInt(0xdeadbeefcafe)...)
+	require.Equal(t, expected, b)
+	require.Len(t, b, int(f.Length(protocol.Version1)))
+}

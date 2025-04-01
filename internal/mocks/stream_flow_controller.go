@@ -11,6 +11,7 @@ package mocks
 
 import (
 	reflect "reflect"
+	time "time"
 
 	gomock "go.uber.org/mock/gomock"
 	protocol "github.com/refraction-networking/uquic/internal/protocol"
@@ -20,6 +21,7 @@ import (
 type MockStreamFlowController struct {
 	ctrl     *gomock.Controller
 	recorder *MockStreamFlowControllerMockRecorder
+	isgomock struct{}
 }
 
 // MockStreamFlowControllerMockRecorder is the mock recorder for MockStreamFlowController.
@@ -76,9 +78,12 @@ func (c *MockStreamFlowControllerAbandonCall) DoAndReturn(f func()) *MockStreamF
 }
 
 // AddBytesRead mocks base method.
-func (m *MockStreamFlowController) AddBytesRead(arg0 protocol.ByteCount) {
+func (m *MockStreamFlowController) AddBytesRead(arg0 protocol.ByteCount) (bool, bool) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "AddBytesRead", arg0)
+	ret := m.ctrl.Call(m, "AddBytesRead", arg0)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(bool)
+	return ret0, ret1
 }
 
 // AddBytesRead indicates an expected call of AddBytesRead.
@@ -94,19 +99,19 @@ type MockStreamFlowControllerAddBytesReadCall struct {
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockStreamFlowControllerAddBytesReadCall) Return() *MockStreamFlowControllerAddBytesReadCall {
-	c.Call = c.Call.Return()
+func (c *MockStreamFlowControllerAddBytesReadCall) Return(hasStreamWindowUpdate, hasConnWindowUpdate bool) *MockStreamFlowControllerAddBytesReadCall {
+	c.Call = c.Call.Return(hasStreamWindowUpdate, hasConnWindowUpdate)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockStreamFlowControllerAddBytesReadCall) Do(f func(protocol.ByteCount)) *MockStreamFlowControllerAddBytesReadCall {
+func (c *MockStreamFlowControllerAddBytesReadCall) Do(f func(protocol.ByteCount) (bool, bool)) *MockStreamFlowControllerAddBytesReadCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockStreamFlowControllerAddBytesReadCall) DoAndReturn(f func(protocol.ByteCount)) *MockStreamFlowControllerAddBytesReadCall {
+func (c *MockStreamFlowControllerAddBytesReadCall) DoAndReturn(f func(protocol.ByteCount) (bool, bool)) *MockStreamFlowControllerAddBytesReadCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -148,17 +153,17 @@ func (c *MockStreamFlowControllerAddBytesSentCall) DoAndReturn(f func(protocol.B
 }
 
 // GetWindowUpdate mocks base method.
-func (m *MockStreamFlowController) GetWindowUpdate() protocol.ByteCount {
+func (m *MockStreamFlowController) GetWindowUpdate(arg0 time.Time) protocol.ByteCount {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetWindowUpdate")
+	ret := m.ctrl.Call(m, "GetWindowUpdate", arg0)
 	ret0, _ := ret[0].(protocol.ByteCount)
 	return ret0
 }
 
 // GetWindowUpdate indicates an expected call of GetWindowUpdate.
-func (mr *MockStreamFlowControllerMockRecorder) GetWindowUpdate() *MockStreamFlowControllerGetWindowUpdateCall {
+func (mr *MockStreamFlowControllerMockRecorder) GetWindowUpdate(arg0 any) *MockStreamFlowControllerGetWindowUpdateCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetWindowUpdate", reflect.TypeOf((*MockStreamFlowController)(nil).GetWindowUpdate))
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetWindowUpdate", reflect.TypeOf((*MockStreamFlowController)(nil).GetWindowUpdate), arg0)
 	return &MockStreamFlowControllerGetWindowUpdateCall{Call: call}
 }
 
@@ -174,24 +179,23 @@ func (c *MockStreamFlowControllerGetWindowUpdateCall) Return(arg0 protocol.ByteC
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockStreamFlowControllerGetWindowUpdateCall) Do(f func() protocol.ByteCount) *MockStreamFlowControllerGetWindowUpdateCall {
+func (c *MockStreamFlowControllerGetWindowUpdateCall) Do(f func(time.Time) protocol.ByteCount) *MockStreamFlowControllerGetWindowUpdateCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockStreamFlowControllerGetWindowUpdateCall) DoAndReturn(f func() protocol.ByteCount) *MockStreamFlowControllerGetWindowUpdateCall {
+func (c *MockStreamFlowControllerGetWindowUpdateCall) DoAndReturn(f func(time.Time) protocol.ByteCount) *MockStreamFlowControllerGetWindowUpdateCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
 
 // IsNewlyBlocked mocks base method.
-func (m *MockStreamFlowController) IsNewlyBlocked() (bool, protocol.ByteCount) {
+func (m *MockStreamFlowController) IsNewlyBlocked() bool {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "IsNewlyBlocked")
 	ret0, _ := ret[0].(bool)
-	ret1, _ := ret[1].(protocol.ByteCount)
-	return ret0, ret1
+	return ret0
 }
 
 // IsNewlyBlocked indicates an expected call of IsNewlyBlocked.
@@ -207,19 +211,19 @@ type MockStreamFlowControllerIsNewlyBlockedCall struct {
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockStreamFlowControllerIsNewlyBlockedCall) Return(arg0 bool, arg1 protocol.ByteCount) *MockStreamFlowControllerIsNewlyBlockedCall {
-	c.Call = c.Call.Return(arg0, arg1)
+func (c *MockStreamFlowControllerIsNewlyBlockedCall) Return(arg0 bool) *MockStreamFlowControllerIsNewlyBlockedCall {
+	c.Call = c.Call.Return(arg0)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockStreamFlowControllerIsNewlyBlockedCall) Do(f func() (bool, protocol.ByteCount)) *MockStreamFlowControllerIsNewlyBlockedCall {
+func (c *MockStreamFlowControllerIsNewlyBlockedCall) Do(f func() bool) *MockStreamFlowControllerIsNewlyBlockedCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockStreamFlowControllerIsNewlyBlockedCall) DoAndReturn(f func() (bool, protocol.ByteCount)) *MockStreamFlowControllerIsNewlyBlockedCall {
+func (c *MockStreamFlowControllerIsNewlyBlockedCall) DoAndReturn(f func() bool) *MockStreamFlowControllerIsNewlyBlockedCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -263,17 +267,17 @@ func (c *MockStreamFlowControllerSendWindowSizeCall) DoAndReturn(f func() protoc
 }
 
 // UpdateHighestReceived mocks base method.
-func (m *MockStreamFlowController) UpdateHighestReceived(arg0 protocol.ByteCount, arg1 bool) error {
+func (m *MockStreamFlowController) UpdateHighestReceived(offset protocol.ByteCount, final bool, now time.Time) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateHighestReceived", arg0, arg1)
+	ret := m.ctrl.Call(m, "UpdateHighestReceived", offset, final, now)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdateHighestReceived indicates an expected call of UpdateHighestReceived.
-func (mr *MockStreamFlowControllerMockRecorder) UpdateHighestReceived(arg0, arg1 any) *MockStreamFlowControllerUpdateHighestReceivedCall {
+func (mr *MockStreamFlowControllerMockRecorder) UpdateHighestReceived(offset, final, now any) *MockStreamFlowControllerUpdateHighestReceivedCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateHighestReceived", reflect.TypeOf((*MockStreamFlowController)(nil).UpdateHighestReceived), arg0, arg1)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateHighestReceived", reflect.TypeOf((*MockStreamFlowController)(nil).UpdateHighestReceived), offset, final, now)
 	return &MockStreamFlowControllerUpdateHighestReceivedCall{Call: call}
 }
 
@@ -289,13 +293,13 @@ func (c *MockStreamFlowControllerUpdateHighestReceivedCall) Return(arg0 error) *
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockStreamFlowControllerUpdateHighestReceivedCall) Do(f func(protocol.ByteCount, bool) error) *MockStreamFlowControllerUpdateHighestReceivedCall {
+func (c *MockStreamFlowControllerUpdateHighestReceivedCall) Do(f func(protocol.ByteCount, bool, time.Time) error) *MockStreamFlowControllerUpdateHighestReceivedCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockStreamFlowControllerUpdateHighestReceivedCall) DoAndReturn(f func(protocol.ByteCount, bool) error) *MockStreamFlowControllerUpdateHighestReceivedCall {
+func (c *MockStreamFlowControllerUpdateHighestReceivedCall) DoAndReturn(f func(protocol.ByteCount, bool, time.Time) error) *MockStreamFlowControllerUpdateHighestReceivedCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -321,8 +325,8 @@ type MockStreamFlowControllerUpdateSendWindowCall struct {
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockStreamFlowControllerUpdateSendWindowCall) Return(arg0 bool) *MockStreamFlowControllerUpdateSendWindowCall {
-	c.Call = c.Call.Return(arg0)
+func (c *MockStreamFlowControllerUpdateSendWindowCall) Return(updated bool) *MockStreamFlowControllerUpdateSendWindowCall {
+	c.Call = c.Call.Return(updated)
 	return c
 }
 

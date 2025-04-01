@@ -41,14 +41,14 @@ func main() {
 	}
 	testdata.AddRootCA(pool)
 
-	roundTripper := &http3.RoundTripper{
+	roundTripper := &http3.Transport{
 		TLSClientConfig: &tls.Config{
 			RootCAs:            pool,
 			InsecureSkipVerify: *insecure,
 			KeyLogWriter:       keyLog,
 		},
-		QuicConfig: &quic.Config{
-			Tracer: qlog.DefaultTracer,
+		QUICConfig: &quic.Config{
+			Tracer: qlog.DefaultConnectionTracer,
 		},
 	}
 	defer roundTripper.Close()

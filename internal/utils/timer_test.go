@@ -1,95 +1,151 @@
 package utils
 
 import (
+	"testing"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
 )
 
-var _ = Describe("Timer", func() {
-	const d = 10 * time.Millisecond
+const testDuration = 10 * time.Millisecond
 
-	It("doesn't fire a newly created timer", func() {
-		t := NewTimer()
-		Consistently(t.Chan()).ShouldNot(Receive())
-	})
+func TestTimerCreateAndReset(t *testing.T) {
+	timer := NewTimer()
+	select {
+	case <-timer.Chan():
+		t.Fatal("timer should not have fired")
+	default:
+	}
 
-	It("works", func() {
-		t := NewTimer()
-		t.Reset(time.Now().Add(d))
-		Eventually(t.Chan()).Should(Receive())
-	})
+	deadline := time.Now().Add(testDuration)
+	timer.Reset(deadline)
+	require.Equal(t, deadline, timer.Deadline())
 
-	It("returns the deadline", func() {
-		t := NewTimer()
-		deadline := time.Now().Add(d)
-		t.Reset(deadline)
-		Expect(t.Deadline()).To(Equal(deadline))
-		Eventually(t.Chan()).Should(Receive())
-	})
+	select {
+	case <-timer.Chan():
+	case <-time.After(2 * testDuration):
+		t.Fatal("timer should have fired")
+	}
 
-	It("works multiple times with reading", func() {
-		t := NewTimer()
-		for i := 0; i < 10; i++ {
-			t.Reset(time.Now().Add(d))
-			Eventually(t.Chan()).Should(Receive())
-			t.SetRead()
+	timer.SetRead()
+	timer.Reset(time.Now().Add(testDuration))
+
+	select {
+	case <-timer.Chan():
+	case <-time.After(2 * testDuration):
+		t.Fatal("timer should have fired")
+	}
+}
+
+func TestTimerMultipleResets(t *testing.T) {
+	timer := NewTimer()
+	for i := 0; i < 10; i++ {
+		timer.Reset(time.Now().Add(testDuration))
+		if i%2 == 0 {
+			select {
+			case <-timer.Chan():
+			case <-time.After(2 * testDuration):
+				t.Fatal("timer should have fired")
+			}
+			timer.SetRead()
+		} else {
+			time.Sleep(testDuration * 2)
 		}
-	})
+	}
 
-	It("works multiple times without reading", func() {
-		t := NewTimer()
-		for i := 0; i < 10; i++ {
-			t.Reset(time.Now().Add(d))
-			time.Sleep(d * 2)
-		}
-		Eventually(t.Chan()).Should(Receive())
-	})
+	select {
+	case <-timer.Chan():
+	case <-time.After(2 * testDuration):
+		t.Fatal("timer should have fired")
+	}
+}
 
-	It("works when resetting without expiration", func() {
-		t := NewTimer()
-		for i := 0; i < 10; i++ {
-			t.Reset(time.Now().Add(time.Hour))
-		}
-		t.Reset(time.Now().Add(d))
-		Eventually(t.Chan()).Should(Receive())
-	})
+func TestTimerResetWithoutExpiration(t *testing.T) {
+	timer := NewTimer()
+	for i := 0; i < 10; i++ {
+		timer.Reset(time.Now().Add(time.Hour))
+	}
+	timer.Reset(time.Now().Add(testDuration))
 
-	It("immediately fires the timer, if the deadlines has already passed", func() {
-		t := NewTimer()
-		t.Reset(time.Now().Add(-time.Second))
-		Eventually(t.Chan()).Should(Receive())
-	})
+	select {
+	case <-timer.Chan():
+	case <-time.After(2 * testDuration):
+		t.Fatal("timer should have fired")
+	}
+}
 
-	It("doesn't set a timer if the deadline is the zero value", func() {
-		t := NewTimer()
-		t.Reset(time.Time{})
-		Consistently(t.Chan()).ShouldNot(Receive())
-	})
+func TestTimerPastDeadline(t *testing.T) {
+	timer := NewTimer()
+	timer.Reset(time.Now().Add(-time.Second))
 
-	It("fires the timer twice, if reset to the same deadline", func() {
+	select {
+	case <-timer.Chan():
+	case <-time.After(testDuration):
+		t.Fatal("timer should have fired immediately")
+	}
+}
+
+func TestTimerZeroDeadline(t *testing.T) {
+	timer := NewTimer()
+	timer.Reset(time.Time{})
+
+	// we don't expect the timer to be set for a zero deadline
+	select {
+	case <-timer.Chan():
+		t.Fatal("timer should not have fired")
+	case <-time.After(testDuration):
+	}
+}
+
+func TestTimerSameDeadline(t *testing.T) {
+	t.Run("timer read in between", func(t *testing.T) {
 		deadline := time.Now().Add(-time.Millisecond)
-		t := NewTimer()
-		t.Reset(deadline)
-		Eventually(t.Chan()).Should(Receive())
-		t.SetRead()
-		t.Reset(deadline)
-		Eventually(t.Chan()).Should(Receive())
+		timer := NewTimer()
+		timer.Reset(deadline)
+
+		select {
+		case <-timer.Chan():
+		case <-time.After(testDuration):
+			t.Fatal("timer should have fired")
+		}
+
+		timer.SetRead()
+		timer.Reset(deadline)
+
+		select {
+		case <-timer.Chan():
+		case <-time.After(testDuration):
+			t.Fatal("timer should have fired")
+		}
 	})
 
-	It("only fires the timer once, if it is reset to the same deadline, but not read in between", func() {
+	t.Run("timer not read in between", func(t *testing.T) {
 		deadline := time.Now().Add(-time.Millisecond)
-		t := NewTimer()
-		t.Reset(deadline)
-		Eventually(t.Chan()).Should(Receive())
-		Consistently(t.Chan()).ShouldNot(Receive())
-	})
+		timer := NewTimer()
+		timer.Reset(deadline)
 
-	It("stops", func() {
-		t := NewTimer()
-		t.Reset(time.Now().Add(50 * time.Millisecond))
-		t.Stop()
-		Consistently(t.Chan()).ShouldNot(Receive())
+		select {
+		case <-timer.Chan():
+		case <-time.After(testDuration):
+			t.Fatal("timer should have fired")
+		}
+
+		select {
+		case <-timer.Chan():
+			t.Fatal("timer should not have fired again")
+		case <-time.After(testDuration):
+		}
 	})
-})
+}
+
+func TestTimerStopping(t *testing.T) {
+	timer := NewTimer()
+	timer.Reset(time.Now().Add(testDuration))
+	timer.Stop()
+
+	select {
+	case <-timer.Chan():
+		t.Fatal("timer should not have fired")
+	case <-time.After(2 * testDuration):
+	}
+}

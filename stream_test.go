@@ -1,107 +1,102 @@
 package quic
 
 import (
-	"errors"
+	"context"
 	"io"
 	"os"
-	"strconv"
+	"testing"
 	"time"
 
 	"github.com/refraction-networking/uquic/internal/mocks"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/wire"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"github.com/onsi/gomega/gbytes"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 )
 
-// in the tests for the stream deadlines we set a deadline
-// and wait to make an assertion when Read / Write was unblocked
-// on the CIs, the timing is a lot less precise, so scale every duration by this factor
-func scaleDuration(t time.Duration) time.Duration {
-	scaleFactor := 1
-	if f, err := strconv.Atoi(os.Getenv("TIMESCALE_FACTOR")); err == nil { // parsing "" errors, so this works fine if the env is not set
-		scaleFactor = f
-	}
-	Expect(scaleFactor).ToNot(BeZero())
-	return time.Duration(scaleFactor) * t
+func TestStreamDeadlines(t *testing.T) {
+	const streamID protocol.StreamID = 1337
+	mockCtrl := gomock.NewController(t)
+	mockSender := NewMockStreamSender(mockCtrl)
+	mockFC := mocks.NewMockStreamFlowController(mockCtrl)
+	str := newStream(context.Background(), streamID, mockSender, mockFC)
+
+	// SetDeadline sets both read and write deadlines
+	str.SetDeadline(time.Now().Add(-time.Second))
+	n, err := (&writerWithTimeout{Writer: str, Timeout: time.Second}).Write([]byte("foobar"))
+	require.ErrorIs(t, err, os.ErrDeadlineExceeded)
+	require.Zero(t, n)
+
+	mockFC.EXPECT().UpdateHighestReceived(protocol.ByteCount(6), false, gomock.Any()).AnyTimes()
+	require.NoError(t, str.handleStreamFrame(&wire.StreamFrame{Data: []byte("foobar")}, time.Now()))
+	n, err = (&readerWithTimeout{Reader: str, Timeout: time.Second}).Read(make([]byte, 6))
+	require.ErrorIs(t, err, os.ErrDeadlineExceeded)
+	require.Zero(t, n)
 }
 
-var _ = Describe("Stream", func() {
+func TestStreamCompletion(t *testing.T) {
+	completeReadSide := func(
+		t *testing.T,
+		str *stream,
+		mockCtrl *gomock.Controller,
+		mockFC *mocks.MockStreamFlowController,
+	) {
+		t.Helper()
+		mockFC.EXPECT().UpdateHighestReceived(protocol.ByteCount(6), true, gomock.Any())
+		mockFC.EXPECT().AddBytesRead(protocol.ByteCount(6))
+		require.NoError(t, str.handleStreamFrame(&wire.StreamFrame{
+			StreamID: str.StreamID(),
+			Data:     []byte("foobar"),
+			Fin:      true,
+		}, time.Now()))
+		_, err := (&readerWithTimeout{Reader: str, Timeout: time.Second}).Read(make([]byte, 6))
+		require.ErrorIs(t, err, io.EOF)
+		require.True(t, mockCtrl.Satisfied())
+	}
+
+	completeWriteSide := func(
+		t *testing.T,
+		str *stream,
+		mockCtrl *gomock.Controller,
+		mockFC *mocks.MockStreamFlowController,
+		mockSender *MockStreamSender,
+	) {
+		t.Helper()
+		mockSender.EXPECT().onHasStreamData(str.StreamID(), gomock.Any()).Times(2)
+		_, err := (&writerWithTimeout{Writer: str, Timeout: time.Second}).Write([]byte("foobar"))
+		require.NoError(t, err)
+		require.NoError(t, str.Close())
+		mockFC.EXPECT().SendWindowSize().Return(protocol.MaxByteCount)
+		mockFC.EXPECT().AddBytesSent(protocol.ByteCount(6))
+		f, _, _ := str.popStreamFrame(protocol.MaxByteCount, protocol.Version1)
+		require.NotNil(t, f.Frame)
+		require.True(t, f.Frame.Fin)
+		f.Handler.OnAcked(f.Frame)
+		require.True(t, mockCtrl.Satisfied())
+	}
+
 	const streamID protocol.StreamID = 1337
 
-	var (
-		str            *stream
-		strWithTimeout io.ReadWriter // str wrapped with gbytes.Timeout{Reader,Writer}
-		mockFC         *mocks.MockStreamFlowController
-		mockSender     *MockStreamSender
-	)
+	t.Run("first read, then write", func(t *testing.T) {
+		mockCtrl := gomock.NewController(t)
+		mockSender := NewMockStreamSender(mockCtrl)
+		mockFC := mocks.NewMockStreamFlowController(mockCtrl)
+		str := newStream(context.Background(), streamID, mockSender, mockFC)
 
-	BeforeEach(func() {
-		mockSender = NewMockStreamSender(mockCtrl)
-		mockFC = mocks.NewMockStreamFlowController(mockCtrl)
-		str = newStream(streamID, mockSender, mockFC)
-
-		timeout := scaleDuration(250 * time.Millisecond)
-		strWithTimeout = struct {
-			io.Reader
-			io.Writer
-		}{
-			gbytes.TimeoutReader(str, timeout),
-			gbytes.TimeoutWriter(str, timeout),
-		}
+		completeReadSide(t, str, mockCtrl, mockFC)
+		mockSender.EXPECT().onStreamCompleted(streamID)
+		completeWriteSide(t, str, mockCtrl, mockFC, mockSender)
 	})
 
-	It("gets stream id", func() {
-		Expect(str.StreamID()).To(Equal(protocol.StreamID(1337)))
+	t.Run("first write, then read", func(t *testing.T) {
+		mockCtrl := gomock.NewController(t)
+		mockSender := NewMockStreamSender(mockCtrl)
+		mockFC := mocks.NewMockStreamFlowController(mockCtrl)
+		str := newStream(context.Background(), streamID, mockSender, mockFC)
+
+		completeWriteSide(t, str, mockCtrl, mockFC, mockSender)
+		mockSender.EXPECT().onStreamCompleted(streamID)
+		completeReadSide(t, str, mockCtrl, mockFC)
 	})
-
-	Context("deadlines", func() {
-		It("sets a write deadline, when SetDeadline is called", func() {
-			str.SetDeadline(time.Now().Add(-time.Second))
-			n, err := strWithTimeout.Write([]byte("foobar"))
-			Expect(err).To(MatchError(errDeadline))
-			Expect(n).To(BeZero())
-		})
-
-		It("sets a read deadline, when SetDeadline is called", func() {
-			mockFC.EXPECT().UpdateHighestReceived(protocol.ByteCount(6), false).AnyTimes()
-			f := &wire.StreamFrame{Data: []byte("foobar")}
-			err := str.handleStreamFrame(f)
-			Expect(err).ToNot(HaveOccurred())
-			str.SetDeadline(time.Now().Add(-time.Second))
-			b := make([]byte, 6)
-			n, err := strWithTimeout.Read(b)
-			Expect(err).To(MatchError(errDeadline))
-			Expect(n).To(BeZero())
-		})
-	})
-
-	Context("completing", func() {
-		It("is not completed when only the receive side is completed", func() {
-			// don't EXPECT a call to mockSender.onStreamCompleted()
-			str.receiveStream.sender.onStreamCompleted(streamID)
-		})
-
-		It("is not completed when only the send side is completed", func() {
-			// don't EXPECT a call to mockSender.onStreamCompleted()
-			str.sendStream.sender.onStreamCompleted(streamID)
-		})
-
-		It("is completed when both sides are completed", func() {
-			mockSender.EXPECT().onStreamCompleted(streamID)
-			str.sendStream.sender.onStreamCompleted(streamID)
-			str.receiveStream.sender.onStreamCompleted(streamID)
-		})
-	})
-})
-
-var _ = Describe("Deadline Error", func() {
-	It("is a net.Error that wraps os.ErrDeadlineError", func() {
-		err := deadlineError{}
-		Expect(err.Timeout()).To(BeTrue())
-		Expect(errors.Is(err, os.ErrDeadlineExceeded)).To(BeTrue())
-		Expect(errors.Unwrap(err)).To(Equal(os.ErrDeadlineExceeded))
-	})
-})
+}

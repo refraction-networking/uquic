@@ -15,14 +15,13 @@ import (
 
 	logging "github.com/refraction-networking/uquic/logging"
 	gomock "go.uber.org/mock/gomock"
-	protocol "github.com/refraction-networking/uquic/internal/protocol"
-	wire "github.com/refraction-networking/uquic/internal/wire"
 )
 
 // MockTracer is a mock of Tracer interface.
 type MockTracer struct {
 	ctrl     *gomock.Controller
 	recorder *MockTracerMockRecorder
+	isgomock struct{}
 }
 
 // MockTracerMockRecorder is the mock recorder for MockTracer.
@@ -79,15 +78,15 @@ func (c *MockTracerCloseCall) DoAndReturn(f func()) *MockTracerCloseCall {
 }
 
 // Debug mocks base method.
-func (m *MockTracer) Debug(arg0, arg1 string) {
+func (m *MockTracer) Debug(name, msg string) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Debug", arg0, arg1)
+	m.ctrl.Call(m, "Debug", name, msg)
 }
 
 // Debug indicates an expected call of Debug.
-func (mr *MockTracerMockRecorder) Debug(arg0, arg1 any) *MockTracerDebugCall {
+func (mr *MockTracerMockRecorder) Debug(name, msg any) *MockTracerDebugCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Debug", reflect.TypeOf((*MockTracer)(nil).Debug), arg0, arg1)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Debug", reflect.TypeOf((*MockTracer)(nil).Debug), name, msg)
 	return &MockTracerDebugCall{Call: call}
 }
 
@@ -115,7 +114,7 @@ func (c *MockTracerDebugCall) DoAndReturn(f func(string, string)) *MockTracerDeb
 }
 
 // DroppedPacket mocks base method.
-func (m *MockTracer) DroppedPacket(arg0 net.Addr, arg1 logging.PacketType, arg2 protocol.ByteCount, arg3 logging.PacketDropReason) {
+func (m *MockTracer) DroppedPacket(arg0 net.Addr, arg1 logging.PacketType, arg2 logging.ByteCount, arg3 logging.PacketDropReason) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "DroppedPacket", arg0, arg1, arg2, arg3)
 }
@@ -139,19 +138,19 @@ func (c *MockTracerDroppedPacketCall) Return() *MockTracerDroppedPacketCall {
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockTracerDroppedPacketCall) Do(f func(net.Addr, logging.PacketType, protocol.ByteCount, logging.PacketDropReason)) *MockTracerDroppedPacketCall {
+func (c *MockTracerDroppedPacketCall) Do(f func(net.Addr, logging.PacketType, logging.ByteCount, logging.PacketDropReason)) *MockTracerDroppedPacketCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockTracerDroppedPacketCall) DoAndReturn(f func(net.Addr, logging.PacketType, protocol.ByteCount, logging.PacketDropReason)) *MockTracerDroppedPacketCall {
+func (c *MockTracerDroppedPacketCall) DoAndReturn(f func(net.Addr, logging.PacketType, logging.ByteCount, logging.PacketDropReason)) *MockTracerDroppedPacketCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
 
 // SentPacket mocks base method.
-func (m *MockTracer) SentPacket(arg0 net.Addr, arg1 *wire.Header, arg2 protocol.ByteCount, arg3 []logging.Frame) {
+func (m *MockTracer) SentPacket(arg0 net.Addr, arg1 *logging.Header, arg2 logging.ByteCount, arg3 []logging.Frame) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "SentPacket", arg0, arg1, arg2, arg3)
 }
@@ -175,27 +174,27 @@ func (c *MockTracerSentPacketCall) Return() *MockTracerSentPacketCall {
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockTracerSentPacketCall) Do(f func(net.Addr, *wire.Header, protocol.ByteCount, []logging.Frame)) *MockTracerSentPacketCall {
+func (c *MockTracerSentPacketCall) Do(f func(net.Addr, *logging.Header, logging.ByteCount, []logging.Frame)) *MockTracerSentPacketCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockTracerSentPacketCall) DoAndReturn(f func(net.Addr, *wire.Header, protocol.ByteCount, []logging.Frame)) *MockTracerSentPacketCall {
+func (c *MockTracerSentPacketCall) DoAndReturn(f func(net.Addr, *logging.Header, logging.ByteCount, []logging.Frame)) *MockTracerSentPacketCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
 
 // SentVersionNegotiationPacket mocks base method.
-func (m *MockTracer) SentVersionNegotiationPacket(arg0 net.Addr, arg1, arg2 protocol.ArbitraryLenConnectionID, arg3 []protocol.Version) {
+func (m *MockTracer) SentVersionNegotiationPacket(arg0 net.Addr, dest, src logging.ArbitraryLenConnectionID, arg3 []logging.Version) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "SentVersionNegotiationPacket", arg0, arg1, arg2, arg3)
+	m.ctrl.Call(m, "SentVersionNegotiationPacket", arg0, dest, src, arg3)
 }
 
 // SentVersionNegotiationPacket indicates an expected call of SentVersionNegotiationPacket.
-func (mr *MockTracerMockRecorder) SentVersionNegotiationPacket(arg0, arg1, arg2, arg3 any) *MockTracerSentVersionNegotiationPacketCall {
+func (mr *MockTracerMockRecorder) SentVersionNegotiationPacket(arg0, dest, src, arg3 any) *MockTracerSentVersionNegotiationPacketCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SentVersionNegotiationPacket", reflect.TypeOf((*MockTracer)(nil).SentVersionNegotiationPacket), arg0, arg1, arg2, arg3)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SentVersionNegotiationPacket", reflect.TypeOf((*MockTracer)(nil).SentVersionNegotiationPacket), arg0, dest, src, arg3)
 	return &MockTracerSentVersionNegotiationPacketCall{Call: call}
 }
 
@@ -211,13 +210,13 @@ func (c *MockTracerSentVersionNegotiationPacketCall) Return() *MockTracerSentVer
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockTracerSentVersionNegotiationPacketCall) Do(f func(net.Addr, protocol.ArbitraryLenConnectionID, protocol.ArbitraryLenConnectionID, []protocol.Version)) *MockTracerSentVersionNegotiationPacketCall {
+func (c *MockTracerSentVersionNegotiationPacketCall) Do(f func(net.Addr, logging.ArbitraryLenConnectionID, logging.ArbitraryLenConnectionID, []logging.Version)) *MockTracerSentVersionNegotiationPacketCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockTracerSentVersionNegotiationPacketCall) DoAndReturn(f func(net.Addr, protocol.ArbitraryLenConnectionID, protocol.ArbitraryLenConnectionID, []protocol.Version)) *MockTracerSentVersionNegotiationPacketCall {
+func (c *MockTracerSentVersionNegotiationPacketCall) DoAndReturn(f func(net.Addr, logging.ArbitraryLenConnectionID, logging.ArbitraryLenConnectionID, []logging.Version)) *MockTracerSentVersionNegotiationPacketCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

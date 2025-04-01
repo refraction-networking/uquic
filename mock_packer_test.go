@@ -11,6 +11,7 @@ package quic
 
 import (
 	reflect "reflect"
+	time "time"
 
 	gomock "go.uber.org/mock/gomock"
 	ackhandler "github.com/refraction-networking/uquic/internal/ackhandler"
@@ -22,6 +23,7 @@ import (
 type MockPacker struct {
 	ctrl     *gomock.Controller
 	recorder *MockPackerMockRecorder
+	isgomock struct{}
 }
 
 // MockPackerMockRecorder is the mock recorder for MockPacker.
@@ -42,18 +44,18 @@ func (m *MockPacker) EXPECT() *MockPackerMockRecorder {
 }
 
 // AppendPacket mocks base method.
-func (m *MockPacker) AppendPacket(arg0 *packetBuffer, arg1 protocol.ByteCount, arg2 protocol.Version) (shortHeaderPacket, error) {
+func (m *MockPacker) AppendPacket(buf *packetBuffer, maxPacketSize protocol.ByteCount, now time.Time, v protocol.Version) (shortHeaderPacket, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "AppendPacket", arg0, arg1, arg2)
+	ret := m.ctrl.Call(m, "AppendPacket", buf, maxPacketSize, now, v)
 	ret0, _ := ret[0].(shortHeaderPacket)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // AppendPacket indicates an expected call of AppendPacket.
-func (mr *MockPackerMockRecorder) AppendPacket(arg0, arg1, arg2 any) *MockPackerAppendPacketCall {
+func (mr *MockPackerMockRecorder) AppendPacket(buf, maxPacketSize, now, v any) *MockPackerAppendPacketCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AppendPacket", reflect.TypeOf((*MockPacker)(nil).AppendPacket), arg0, arg1, arg2)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AppendPacket", reflect.TypeOf((*MockPacker)(nil).AppendPacket), buf, maxPacketSize, now, v)
 	return &MockPackerAppendPacketCall{Call: call}
 }
 
@@ -69,60 +71,60 @@ func (c *MockPackerAppendPacketCall) Return(arg0 shortHeaderPacket, arg1 error) 
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockPackerAppendPacketCall) Do(f func(*packetBuffer, protocol.ByteCount, protocol.Version) (shortHeaderPacket, error)) *MockPackerAppendPacketCall {
+func (c *MockPackerAppendPacketCall) Do(f func(*packetBuffer, protocol.ByteCount, time.Time, protocol.Version) (shortHeaderPacket, error)) *MockPackerAppendPacketCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockPackerAppendPacketCall) DoAndReturn(f func(*packetBuffer, protocol.ByteCount, protocol.Version) (shortHeaderPacket, error)) *MockPackerAppendPacketCall {
+func (c *MockPackerAppendPacketCall) DoAndReturn(f func(*packetBuffer, protocol.ByteCount, time.Time, protocol.Version) (shortHeaderPacket, error)) *MockPackerAppendPacketCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
 
-// MaybePackProbePacket mocks base method.
-func (m *MockPacker) MaybePackProbePacket(arg0 protocol.EncryptionLevel, arg1 protocol.ByteCount, arg2 protocol.Version) (*coalescedPacket, error) {
+// MaybePackPTOProbePacket mocks base method.
+func (m *MockPacker) MaybePackPTOProbePacket(arg0 protocol.EncryptionLevel, arg1 protocol.ByteCount, arg2 time.Time, arg3 protocol.Version) (*coalescedPacket, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "MaybePackProbePacket", arg0, arg1, arg2)
+	ret := m.ctrl.Call(m, "MaybePackPTOProbePacket", arg0, arg1, arg2, arg3)
 	ret0, _ := ret[0].(*coalescedPacket)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// MaybePackProbePacket indicates an expected call of MaybePackProbePacket.
-func (mr *MockPackerMockRecorder) MaybePackProbePacket(arg0, arg1, arg2 any) *MockPackerMaybePackProbePacketCall {
+// MaybePackPTOProbePacket indicates an expected call of MaybePackPTOProbePacket.
+func (mr *MockPackerMockRecorder) MaybePackPTOProbePacket(arg0, arg1, arg2, arg3 any) *MockPackerMaybePackPTOProbePacketCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MaybePackProbePacket", reflect.TypeOf((*MockPacker)(nil).MaybePackProbePacket), arg0, arg1, arg2)
-	return &MockPackerMaybePackProbePacketCall{Call: call}
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MaybePackPTOProbePacket", reflect.TypeOf((*MockPacker)(nil).MaybePackPTOProbePacket), arg0, arg1, arg2, arg3)
+	return &MockPackerMaybePackPTOProbePacketCall{Call: call}
 }
 
-// MockPackerMaybePackProbePacketCall wrap *gomock.Call
-type MockPackerMaybePackProbePacketCall struct {
+// MockPackerMaybePackPTOProbePacketCall wrap *gomock.Call
+type MockPackerMaybePackPTOProbePacketCall struct {
 	*gomock.Call
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockPackerMaybePackProbePacketCall) Return(arg0 *coalescedPacket, arg1 error) *MockPackerMaybePackProbePacketCall {
+func (c *MockPackerMaybePackPTOProbePacketCall) Return(arg0 *coalescedPacket, arg1 error) *MockPackerMaybePackPTOProbePacketCall {
 	c.Call = c.Call.Return(arg0, arg1)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockPackerMaybePackProbePacketCall) Do(f func(protocol.EncryptionLevel, protocol.ByteCount, protocol.Version) (*coalescedPacket, error)) *MockPackerMaybePackProbePacketCall {
+func (c *MockPackerMaybePackPTOProbePacketCall) Do(f func(protocol.EncryptionLevel, protocol.ByteCount, time.Time, protocol.Version) (*coalescedPacket, error)) *MockPackerMaybePackPTOProbePacketCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockPackerMaybePackProbePacketCall) DoAndReturn(f func(protocol.EncryptionLevel, protocol.ByteCount, protocol.Version) (*coalescedPacket, error)) *MockPackerMaybePackProbePacketCall {
+func (c *MockPackerMaybePackPTOProbePacketCall) DoAndReturn(f func(protocol.EncryptionLevel, protocol.ByteCount, time.Time, protocol.Version) (*coalescedPacket, error)) *MockPackerMaybePackPTOProbePacketCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
 
 // PackAckOnlyPacket mocks base method.
-func (m *MockPacker) PackAckOnlyPacket(arg0 protocol.ByteCount, arg1 protocol.Version) (shortHeaderPacket, *packetBuffer, error) {
+func (m *MockPacker) PackAckOnlyPacket(maxPacketSize protocol.ByteCount, now time.Time, v protocol.Version) (shortHeaderPacket, *packetBuffer, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "PackAckOnlyPacket", arg0, arg1)
+	ret := m.ctrl.Call(m, "PackAckOnlyPacket", maxPacketSize, now, v)
 	ret0, _ := ret[0].(shortHeaderPacket)
 	ret1, _ := ret[1].(*packetBuffer)
 	ret2, _ := ret[2].(error)
@@ -130,9 +132,9 @@ func (m *MockPacker) PackAckOnlyPacket(arg0 protocol.ByteCount, arg1 protocol.Ve
 }
 
 // PackAckOnlyPacket indicates an expected call of PackAckOnlyPacket.
-func (mr *MockPackerMockRecorder) PackAckOnlyPacket(arg0, arg1 any) *MockPackerPackAckOnlyPacketCall {
+func (mr *MockPackerMockRecorder) PackAckOnlyPacket(maxPacketSize, now, v any) *MockPackerPackAckOnlyPacketCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PackAckOnlyPacket", reflect.TypeOf((*MockPacker)(nil).PackAckOnlyPacket), arg0, arg1)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PackAckOnlyPacket", reflect.TypeOf((*MockPacker)(nil).PackAckOnlyPacket), maxPacketSize, now, v)
 	return &MockPackerPackAckOnlyPacketCall{Call: call}
 }
 
@@ -148,13 +150,13 @@ func (c *MockPackerPackAckOnlyPacketCall) Return(arg0 shortHeaderPacket, arg1 *p
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockPackerPackAckOnlyPacketCall) Do(f func(protocol.ByteCount, protocol.Version) (shortHeaderPacket, *packetBuffer, error)) *MockPackerPackAckOnlyPacketCall {
+func (c *MockPackerPackAckOnlyPacketCall) Do(f func(protocol.ByteCount, time.Time, protocol.Version) (shortHeaderPacket, *packetBuffer, error)) *MockPackerPackAckOnlyPacketCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockPackerPackAckOnlyPacketCall) DoAndReturn(f func(protocol.ByteCount, protocol.Version) (shortHeaderPacket, *packetBuffer, error)) *MockPackerPackAckOnlyPacketCall {
+func (c *MockPackerPackAckOnlyPacketCall) DoAndReturn(f func(protocol.ByteCount, time.Time, protocol.Version) (shortHeaderPacket, *packetBuffer, error)) *MockPackerPackAckOnlyPacketCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -199,18 +201,18 @@ func (c *MockPackerPackApplicationCloseCall) DoAndReturn(f func(*qerr.Applicatio
 }
 
 // PackCoalescedPacket mocks base method.
-func (m *MockPacker) PackCoalescedPacket(arg0 bool, arg1 protocol.ByteCount, arg2 protocol.Version) (*coalescedPacket, error) {
+func (m *MockPacker) PackCoalescedPacket(onlyAck bool, maxPacketSize protocol.ByteCount, now time.Time, v protocol.Version) (*coalescedPacket, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "PackCoalescedPacket", arg0, arg1, arg2)
+	ret := m.ctrl.Call(m, "PackCoalescedPacket", onlyAck, maxPacketSize, now, v)
 	ret0, _ := ret[0].(*coalescedPacket)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // PackCoalescedPacket indicates an expected call of PackCoalescedPacket.
-func (mr *MockPackerMockRecorder) PackCoalescedPacket(arg0, arg1, arg2 any) *MockPackerPackCoalescedPacketCall {
+func (mr *MockPackerMockRecorder) PackCoalescedPacket(onlyAck, maxPacketSize, now, v any) *MockPackerPackCoalescedPacketCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PackCoalescedPacket", reflect.TypeOf((*MockPacker)(nil).PackCoalescedPacket), arg0, arg1, arg2)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PackCoalescedPacket", reflect.TypeOf((*MockPacker)(nil).PackCoalescedPacket), onlyAck, maxPacketSize, now, v)
 	return &MockPackerPackCoalescedPacketCall{Call: call}
 }
 
@@ -226,13 +228,13 @@ func (c *MockPackerPackCoalescedPacketCall) Return(arg0 *coalescedPacket, arg1 e
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockPackerPackCoalescedPacketCall) Do(f func(bool, protocol.ByteCount, protocol.Version) (*coalescedPacket, error)) *MockPackerPackCoalescedPacketCall {
+func (c *MockPackerPackCoalescedPacketCall) Do(f func(bool, protocol.ByteCount, time.Time, protocol.Version) (*coalescedPacket, error)) *MockPackerPackCoalescedPacketCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockPackerPackCoalescedPacketCall) DoAndReturn(f func(bool, protocol.ByteCount, protocol.Version) (*coalescedPacket, error)) *MockPackerPackCoalescedPacketCall {
+func (c *MockPackerPackCoalescedPacketCall) DoAndReturn(f func(bool, protocol.ByteCount, time.Time, protocol.Version) (*coalescedPacket, error)) *MockPackerPackCoalescedPacketCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -277,9 +279,9 @@ func (c *MockPackerPackConnectionCloseCall) DoAndReturn(f func(*qerr.TransportEr
 }
 
 // PackMTUProbePacket mocks base method.
-func (m *MockPacker) PackMTUProbePacket(arg0 ackhandler.Frame, arg1 protocol.ByteCount, arg2 protocol.Version) (shortHeaderPacket, *packetBuffer, error) {
+func (m *MockPacker) PackMTUProbePacket(ping ackhandler.Frame, size protocol.ByteCount, v protocol.Version) (shortHeaderPacket, *packetBuffer, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "PackMTUProbePacket", arg0, arg1, arg2)
+	ret := m.ctrl.Call(m, "PackMTUProbePacket", ping, size, v)
 	ret0, _ := ret[0].(shortHeaderPacket)
 	ret1, _ := ret[1].(*packetBuffer)
 	ret2, _ := ret[2].(error)
@@ -287,9 +289,9 @@ func (m *MockPacker) PackMTUProbePacket(arg0 ackhandler.Frame, arg1 protocol.Byt
 }
 
 // PackMTUProbePacket indicates an expected call of PackMTUProbePacket.
-func (mr *MockPackerMockRecorder) PackMTUProbePacket(arg0, arg1, arg2 any) *MockPackerPackMTUProbePacketCall {
+func (mr *MockPackerMockRecorder) PackMTUProbePacket(ping, size, v any) *MockPackerPackMTUProbePacketCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PackMTUProbePacket", reflect.TypeOf((*MockPacker)(nil).PackMTUProbePacket), arg0, arg1, arg2)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PackMTUProbePacket", reflect.TypeOf((*MockPacker)(nil).PackMTUProbePacket), ping, size, v)
 	return &MockPackerPackMTUProbePacketCall{Call: call}
 }
 
@@ -312,6 +314,46 @@ func (c *MockPackerPackMTUProbePacketCall) Do(f func(ackhandler.Frame, protocol.
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockPackerPackMTUProbePacketCall) DoAndReturn(f func(ackhandler.Frame, protocol.ByteCount, protocol.Version) (shortHeaderPacket, *packetBuffer, error)) *MockPackerPackMTUProbePacketCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// PackPathProbePacket mocks base method.
+func (m *MockPacker) PackPathProbePacket(arg0 protocol.ConnectionID, arg1 ackhandler.Frame, arg2 protocol.Version) (shortHeaderPacket, *packetBuffer, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PackPathProbePacket", arg0, arg1, arg2)
+	ret0, _ := ret[0].(shortHeaderPacket)
+	ret1, _ := ret[1].(*packetBuffer)
+	ret2, _ := ret[2].(error)
+	return ret0, ret1, ret2
+}
+
+// PackPathProbePacket indicates an expected call of PackPathProbePacket.
+func (mr *MockPackerMockRecorder) PackPathProbePacket(arg0, arg1, arg2 any) *MockPackerPackPathProbePacketCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PackPathProbePacket", reflect.TypeOf((*MockPacker)(nil).PackPathProbePacket), arg0, arg1, arg2)
+	return &MockPackerPackPathProbePacketCall{Call: call}
+}
+
+// MockPackerPackPathProbePacketCall wrap *gomock.Call
+type MockPackerPackPathProbePacketCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockPackerPackPathProbePacketCall) Return(arg0 shortHeaderPacket, arg1 *packetBuffer, arg2 error) *MockPackerPackPathProbePacketCall {
+	c.Call = c.Call.Return(arg0, arg1, arg2)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockPackerPackPathProbePacketCall) Do(f func(protocol.ConnectionID, ackhandler.Frame, protocol.Version) (shortHeaderPacket, *packetBuffer, error)) *MockPackerPackPathProbePacketCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockPackerPackPathProbePacketCall) DoAndReturn(f func(protocol.ConnectionID, ackhandler.Frame, protocol.Version) (shortHeaderPacket, *packetBuffer, error)) *MockPackerPackPathProbePacketCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

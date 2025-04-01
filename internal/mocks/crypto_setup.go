@@ -10,6 +10,7 @@
 package mocks
 
 import (
+	context "context"
 	reflect "reflect"
 
 	gomock "go.uber.org/mock/gomock"
@@ -21,6 +22,7 @@ import (
 type MockCryptoSetup struct {
 	ctrl     *gomock.Controller
 	recorder *MockCryptoSetupMockRecorder
+	isgomock struct{}
 }
 
 // MockCryptoSetupMockRecorder is the mock recorder for MockCryptoSetup.
@@ -690,17 +692,17 @@ func (c *MockCryptoSetupSetLargest1RTTAckedCall) DoAndReturn(f func(protocol.Pac
 }
 
 // StartHandshake mocks base method.
-func (m *MockCryptoSetup) StartHandshake() error {
+func (m *MockCryptoSetup) StartHandshake(arg0 context.Context) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "StartHandshake")
+	ret := m.ctrl.Call(m, "StartHandshake", arg0)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // StartHandshake indicates an expected call of StartHandshake.
-func (mr *MockCryptoSetupMockRecorder) StartHandshake() *MockCryptoSetupStartHandshakeCall {
+func (mr *MockCryptoSetupMockRecorder) StartHandshake(arg0 any) *MockCryptoSetupStartHandshakeCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StartHandshake", reflect.TypeOf((*MockCryptoSetup)(nil).StartHandshake))
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StartHandshake", reflect.TypeOf((*MockCryptoSetup)(nil).StartHandshake), arg0)
 	return &MockCryptoSetupStartHandshakeCall{Call: call}
 }
 
@@ -716,13 +718,13 @@ func (c *MockCryptoSetupStartHandshakeCall) Return(arg0 error) *MockCryptoSetupS
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockCryptoSetupStartHandshakeCall) Do(f func() error) *MockCryptoSetupStartHandshakeCall {
+func (c *MockCryptoSetupStartHandshakeCall) Do(f func(context.Context) error) *MockCryptoSetupStartHandshakeCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockCryptoSetupStartHandshakeCall) DoAndReturn(f func() error) *MockCryptoSetupStartHandshakeCall {
+func (c *MockCryptoSetupStartHandshakeCall) DoAndReturn(f func(context.Context) error) *MockCryptoSetupStartHandshakeCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

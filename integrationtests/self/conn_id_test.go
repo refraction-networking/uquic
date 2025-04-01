@@ -6,125 +6,148 @@ import (
 	"fmt"
 	"io"
 	mrand "math/rand"
-	"net"
+	"testing"
+	"time"
 
 	quic "github.com/refraction-networking/uquic"
 	"github.com/refraction-networking/uquic/internal/protocol"
+	"github.com/refraction-networking/uquic/logging"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type connIDGenerator struct {
-	length int
+	Length int
 }
 
+var _ quic.ConnectionIDGenerator = &connIDGenerator{}
+
 func (c *connIDGenerator) GenerateConnectionID() (quic.ConnectionID, error) {
-	b := make([]byte, c.length)
+	b := make([]byte, c.Length)
 	if _, err := rand.Read(b); err != nil {
-		fmt.Fprintf(GinkgoWriter, "generating conn ID failed: %s", err)
+		return quic.ConnectionID{}, fmt.Errorf("generating conn ID failed: %w", err)
 	}
 	return protocol.ParseConnectionID(b), nil
 }
 
-func (c *connIDGenerator) ConnectionIDLen() int {
-	return c.length
+func (c *connIDGenerator) ConnectionIDLen() int { return c.Length }
+
+func randomConnIDLen() int { return 2 + int(mrand.Int31n(19)) }
+
+func TestConnectionIDsZeroLength(t *testing.T) {
+	testTransferWithConnectionIDs(t, randomConnIDLen(), 0, nil, nil)
 }
 
-var _ = Describe("Connection ID lengths tests", func() {
-	randomConnIDLen := func() int { return 4 + int(mrand.Int31n(15)) }
+func TestConnectionIDsRandomLengths(t *testing.T) {
+	testTransferWithConnectionIDs(t, randomConnIDLen(), randomConnIDLen(), nil, nil)
+}
 
-	// connIDLen is ignored when connIDGenerator is set
-	runServer := func(connIDLen int, connIDGenerator quic.ConnectionIDGenerator) (*quic.Listener, func()) {
-		if connIDGenerator != nil {
-			GinkgoWriter.Write([]byte(fmt.Sprintf("Using %d byte connection ID generator for the server\n", connIDGenerator.ConnectionIDLen())))
-		} else {
-			GinkgoWriter.Write([]byte(fmt.Sprintf("Using %d byte connection ID for the server\n", connIDLen)))
-		}
-		addr, err := net.ResolveUDPAddr("udp", "localhost:0")
-		Expect(err).ToNot(HaveOccurred())
-		conn, err := net.ListenUDP("udp", addr)
-		Expect(err).ToNot(HaveOccurred())
-		tr := &quic.Transport{
-			Conn:                  conn,
-			ConnectionIDLength:    connIDLen,
-			ConnectionIDGenerator: connIDGenerator,
-		}
-		addTracer(tr)
-		ln, err := tr.Listen(getTLSConfig(), getQuicConfig(nil))
-		Expect(err).ToNot(HaveOccurred())
-		go func() {
-			defer GinkgoRecover()
-			for {
-				conn, err := ln.Accept(context.Background())
-				if err != nil {
-					return
-				}
-				go func() {
-					defer GinkgoRecover()
-					str, err := conn.OpenStream()
-					Expect(err).ToNot(HaveOccurred())
-					defer str.Close()
-					_, err = str.Write(PRData)
-					Expect(err).ToNot(HaveOccurred())
-				}()
-			}
-		}()
-		return ln, func() {
-			ln.Close()
-			tr.Close()
-		}
+func TestConnectionIDsCustomGenerator(t *testing.T) {
+	testTransferWithConnectionIDs(t, 0, 0,
+		&connIDGenerator{Length: randomConnIDLen()},
+		&connIDGenerator{Length: randomConnIDLen()},
+	)
+}
+
+// connIDLen is ignored when connIDGenerator is set
+func testTransferWithConnectionIDs(
+	t *testing.T,
+	serverConnIDLen, clientConnIDLen int,
+	serverConnIDGenerator, clientConnIDGenerator quic.ConnectionIDGenerator,
+) {
+	t.Helper()
+
+	if serverConnIDGenerator != nil {
+		t.Logf("using %d byte connection ID generator for the server", serverConnIDGenerator.ConnectionIDLen())
+	} else {
+		t.Logf("issuing %d byte connection ID from the server", serverConnIDLen)
+	}
+	if clientConnIDGenerator != nil {
+		t.Logf("using %d byte connection ID generator for the client", clientConnIDGenerator.ConnectionIDLen())
+	} else {
+		t.Logf("issuing %d byte connection ID from the client", clientConnIDLen)
 	}
 
-	// connIDLen is ignored when connIDGenerator is set
-	runClient := func(addr net.Addr, connIDLen int, connIDGenerator quic.ConnectionIDGenerator) {
-		if connIDGenerator != nil {
-			GinkgoWriter.Write([]byte(fmt.Sprintf("Using %d byte connection ID generator for the client\n", connIDGenerator.ConnectionIDLen())))
-		} else {
-			GinkgoWriter.Write([]byte(fmt.Sprintf("Using %d byte connection ID for the client\n", connIDLen)))
+	// setup server
+	serverTr := &quic.Transport{
+		Conn:                  newUPDConnLocalhost(t),
+		ConnectionIDLength:    serverConnIDLen,
+		ConnectionIDGenerator: serverConnIDGenerator,
+	}
+	defer serverTr.Close()
+	addTracer(serverTr)
+	serverCounter, serverTracer := newPacketTracer()
+	ln, err := serverTr.Listen(
+		getTLSConfig(),
+		getQuicConfig(&quic.Config{
+			Tracer: func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer {
+				return serverTracer
+			},
+		}),
+	)
+	require.NoError(t, err)
+
+	// setup client
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var conn quic.Connection
+	clientCounter, clientTracer := newPacketTracer()
+	clientQUICConf := getQuicConfig(&quic.Config{
+		Tracer: func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer {
+			return clientTracer
+		},
+	})
+	if clientConnIDGenerator == nil && clientConnIDLen == 0 {
+		conn, err = quic.Dial(ctx, newUPDConnLocalhost(t), ln.Addr(), getTLSClientConfig(), clientQUICConf)
+		require.NoError(t, err)
+	} else {
+		clientTr := &quic.Transport{
+			Conn:                  newUPDConnLocalhost(t),
+			ConnectionIDLength:    clientConnIDLen,
+			ConnectionIDGenerator: clientConnIDGenerator,
 		}
-		laddr, err := net.ResolveUDPAddr("udp", "localhost:0")
-		Expect(err).ToNot(HaveOccurred())
-		conn, err := net.ListenUDP("udp", laddr)
-		Expect(err).ToNot(HaveOccurred())
-		defer conn.Close()
-		tr := &quic.Transport{
-			Conn:                  conn,
-			ConnectionIDLength:    connIDLen,
-			ConnectionIDGenerator: connIDGenerator,
-		}
-		addTracer(tr)
-		defer tr.Close()
-		cl, err := tr.Dial(
-			context.Background(),
-			&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: addr.(*net.UDPAddr).Port},
-			getTLSClientConfig(),
-			getQuicConfig(nil),
-		)
-		Expect(err).ToNot(HaveOccurred())
-		defer cl.CloseWithError(0, "")
-		str, err := cl.AcceptStream(context.Background())
-		Expect(err).ToNot(HaveOccurred())
-		data, err := io.ReadAll(str)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(data).To(Equal(PRData))
+		defer clientTr.Close()
+		addTracer(clientTr)
+		conn, err = clientTr.Dial(ctx, ln.Addr(), getTLSClientConfig(), clientQUICConf)
+		require.NoError(t, err)
 	}
 
-	It("downloads a file using a 0-byte connection ID for the client", func() {
-		ln, closeFn := runServer(randomConnIDLen(), nil)
-		defer closeFn()
-		runClient(ln.Addr(), 0, nil)
-	})
+	serverConn, err := ln.Accept(context.Background())
+	require.NoError(t, err)
+	serverStr, err := serverConn.OpenStream()
+	require.NoError(t, err)
 
-	It("downloads a file when both client and server use a random connection ID length", func() {
-		ln, closeFn := runServer(randomConnIDLen(), nil)
-		defer closeFn()
-		runClient(ln.Addr(), randomConnIDLen(), nil)
-	})
+	go func() {
+		serverStr.Write(PRData)
+		serverStr.Close()
+	}()
 
-	It("downloads a file when both client and server use a custom connection ID generator", func() {
-		ln, closeFn := runServer(0, &connIDGenerator{length: randomConnIDLen()})
-		defer closeFn()
-		runClient(ln.Addr(), 0, &connIDGenerator{length: randomConnIDLen()})
-	})
-})
+	str, err := conn.AcceptStream(context.Background())
+	require.NoError(t, err)
+	data, err := io.ReadAll(str)
+	require.NoError(t, err)
+	require.Equal(t, PRData, data)
+
+	conn.CloseWithError(0, "")
+	serverConn.CloseWithError(0, "")
+
+	for _, p := range serverCounter.getRcvdShortHeaderPackets() {
+		expectedLen := serverConnIDLen
+		if serverConnIDGenerator != nil {
+			expectedLen = serverConnIDGenerator.ConnectionIDLen()
+		}
+		if !assert.Equal(t, expectedLen, p.hdr.DestConnectionID.Len(), "server conn length mismatch") {
+			break
+		}
+	}
+	for _, p := range clientCounter.getRcvdShortHeaderPackets() {
+		expectedLen := clientConnIDLen
+		if clientConnIDGenerator != nil {
+			expectedLen = clientConnIDGenerator.ConnectionIDLen()
+		}
+		if !assert.Equal(t, expectedLen, p.hdr.DestConnectionID.Len(), "client conn length mismatch") {
+			break
+		}
+	}
+}

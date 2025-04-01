@@ -1,186 +1,76 @@
 package flowcontrol
 
 import (
+	"testing"
 	"time"
 
 	"github.com/refraction-networking/uquic/internal/protocol"
+	"github.com/refraction-networking/uquic/internal/qerr"
 	"github.com/refraction-networking/uquic/internal/utils"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
 )
 
-var _ = Describe("Connection Flow controller", func() {
-	var (
-		controller         *connectionFlowController
-		queuedWindowUpdate bool
+func TestConnectionFlowControlWindowUpdate(t *testing.T) {
+	fc := NewConnectionFlowController(
+		100, // initial receive window
+		100, // max receive window
+		nil,
+		&utils.RTTStats{},
+		utils.DefaultLogger,
 	)
+	require.False(t, fc.AddBytesRead(1))
+	require.Zero(t, fc.GetWindowUpdate(time.Now()))
+	require.True(t, fc.AddBytesRead(99))
+	require.Equal(t, protocol.ByteCount(200), fc.GetWindowUpdate(time.Now()))
+}
 
-	// update the congestion such that it returns a given value for the smoothed RTT
-	setRtt := func(t time.Duration) {
-		controller.rttStats.UpdateRTT(t, 0, time.Now())
-		Expect(controller.rttStats.SmoothedRTT()).To(Equal(t)) // make sure it worked
-	}
+func TestConnectionWindowAutoTuningNotAllowed(t *testing.T) {
+	// the RTT is 1 second
+	rttStats := &utils.RTTStats{}
+	rttStats.UpdateRTT(time.Second, 0)
+	require.Equal(t, time.Second, rttStats.SmoothedRTT())
 
-	BeforeEach(func() {
-		queuedWindowUpdate = false
-		controller = &connectionFlowController{}
-		controller.rttStats = &utils.RTTStats{}
-		controller.logger = utils.DefaultLogger
-		controller.queueWindowUpdate = func() { queuedWindowUpdate = true }
-		controller.allowWindowIncrease = func(protocol.ByteCount) bool { return true }
-	})
+	callbackCalledWith := protocol.InvalidByteCount
+	fc := NewConnectionFlowController(
+		100, // initial receive window
+		150, // max receive window
+		func(size protocol.ByteCount) bool {
+			callbackCalledWith = size
+			return false
+		},
+		rttStats,
+		utils.DefaultLogger,
+	)
+	now := time.Now()
+	require.NoError(t, fc.IncrementHighestReceived(100, now))
+	fc.AddBytesRead(90)
+	require.Equal(t, protocol.InvalidByteCount, callbackCalledWith)
+	require.Equal(t, protocol.ByteCount(90+100), fc.GetWindowUpdate(now.Add(time.Millisecond)))
+	require.Equal(t, protocol.ByteCount(150-100), callbackCalledWith)
+}
 
-	Context("Constructor", func() {
-		rttStats := &utils.RTTStats{}
+func TestConnectionFlowControlViolation(t *testing.T) {
+	fc := NewConnectionFlowController(100, 100, nil, &utils.RTTStats{}, utils.DefaultLogger)
+	require.NoError(t, fc.IncrementHighestReceived(40, time.Now()))
+	require.NoError(t, fc.IncrementHighestReceived(60, time.Now()))
+	err := fc.IncrementHighestReceived(1, time.Now())
+	var terr *qerr.TransportError
+	require.ErrorAs(t, err, &terr)
+	require.Equal(t, qerr.FlowControlError, terr.ErrorCode)
+}
 
-		It("sets the send and receive windows", func() {
-			receiveWindow := protocol.ByteCount(2000)
-			maxReceiveWindow := protocol.ByteCount(3000)
+func TestConnectionFlowControllerReset(t *testing.T) {
+	fc := NewConnectionFlowController(0, 0, nil, &utils.RTTStats{}, utils.DefaultLogger)
+	fc.UpdateSendWindow(100)
+	fc.AddBytesSent(10)
+	require.Equal(t, protocol.ByteCount(90), fc.SendWindowSize())
+	require.NoError(t, fc.Reset())
+	require.Zero(t, fc.SendWindowSize())
+}
 
-			fc := NewConnectionFlowController(
-				receiveWindow,
-				maxReceiveWindow,
-				nil,
-				func(protocol.ByteCount) bool { return true },
-				rttStats,
-				utils.DefaultLogger).(*connectionFlowController)
-			Expect(fc.receiveWindow).To(Equal(receiveWindow))
-			Expect(fc.maxReceiveWindowSize).To(Equal(maxReceiveWindow))
-		})
-	})
-
-	Context("receive flow control", func() {
-		It("increases the highestReceived by a given window size", func() {
-			controller.highestReceived = 1337
-			controller.IncrementHighestReceived(123)
-			Expect(controller.highestReceived).To(Equal(protocol.ByteCount(1337 + 123)))
-		})
-
-		Context("getting window updates", func() {
-			BeforeEach(func() {
-				controller.receiveWindow = 100
-				controller.receiveWindowSize = 60
-				controller.maxReceiveWindowSize = 1000
-				controller.bytesRead = 100 - 60
-			})
-
-			It("queues window updates", func() {
-				controller.AddBytesRead(1)
-				Expect(queuedWindowUpdate).To(BeFalse())
-				controller.AddBytesRead(29)
-				Expect(queuedWindowUpdate).To(BeTrue())
-				Expect(controller.GetWindowUpdate()).ToNot(BeZero())
-				queuedWindowUpdate = false
-				controller.AddBytesRead(1)
-				Expect(queuedWindowUpdate).To(BeFalse())
-			})
-
-			It("gets a window update", func() {
-				windowSize := controller.receiveWindowSize
-				oldOffset := controller.bytesRead
-				dataRead := windowSize/2 - 1 // make sure not to trigger auto-tuning
-				controller.AddBytesRead(dataRead)
-				offset := controller.GetWindowUpdate()
-				Expect(offset).To(Equal(oldOffset + dataRead + 60))
-			})
-
-			It("auto-tunes the window", func() {
-				var allowed protocol.ByteCount
-				controller.allowWindowIncrease = func(size protocol.ByteCount) bool {
-					allowed = size
-					return true
-				}
-				oldOffset := controller.bytesRead
-				oldWindowSize := controller.receiveWindowSize
-				rtt := scaleDuration(20 * time.Millisecond)
-				setRtt(rtt)
-				controller.epochStartTime = time.Now().Add(-time.Millisecond)
-				controller.epochStartOffset = oldOffset
-				dataRead := oldWindowSize/2 + 1
-				controller.AddBytesRead(dataRead)
-				offset := controller.GetWindowUpdate()
-				newWindowSize := controller.receiveWindowSize
-				Expect(newWindowSize).To(Equal(2 * oldWindowSize))
-				Expect(offset).To(Equal(oldOffset + dataRead + newWindowSize))
-				Expect(allowed).To(Equal(oldWindowSize))
-			})
-
-			It("doesn't auto-tune the window if it's not allowed", func() {
-				controller.allowWindowIncrease = func(protocol.ByteCount) bool { return false }
-				oldOffset := controller.bytesRead
-				oldWindowSize := controller.receiveWindowSize
-				rtt := scaleDuration(20 * time.Millisecond)
-				setRtt(rtt)
-				controller.epochStartTime = time.Now().Add(-time.Millisecond)
-				controller.epochStartOffset = oldOffset
-				dataRead := oldWindowSize/2 + 1
-				controller.AddBytesRead(dataRead)
-				offset := controller.GetWindowUpdate()
-				newWindowSize := controller.receiveWindowSize
-				Expect(newWindowSize).To(Equal(oldWindowSize))
-				Expect(offset).To(Equal(oldOffset + dataRead + newWindowSize))
-			})
-		})
-	})
-
-	Context("setting the minimum window size", func() {
-		var (
-			oldWindowSize     protocol.ByteCount
-			receiveWindow     protocol.ByteCount = 10000
-			receiveWindowSize protocol.ByteCount = 1000
-		)
-
-		BeforeEach(func() {
-			controller.receiveWindow = receiveWindow
-			controller.receiveWindowSize = receiveWindowSize
-			oldWindowSize = controller.receiveWindowSize
-			controller.maxReceiveWindowSize = 3000
-		})
-
-		It("sets the minimum window window size", func() {
-			controller.EnsureMinimumWindowSize(1800)
-			Expect(controller.receiveWindowSize).To(Equal(protocol.ByteCount(1800)))
-		})
-
-		It("doesn't reduce the window window size", func() {
-			controller.EnsureMinimumWindowSize(1)
-			Expect(controller.receiveWindowSize).To(Equal(oldWindowSize))
-		})
-
-		It("doesn't increase the window size beyond the maxReceiveWindowSize", func() {
-			max := controller.maxReceiveWindowSize
-			controller.EnsureMinimumWindowSize(2 * max)
-			Expect(controller.receiveWindowSize).To(Equal(max))
-		})
-
-		It("starts a new epoch after the window size was increased", func() {
-			controller.EnsureMinimumWindowSize(1912)
-			Expect(controller.epochStartTime).To(BeTemporally("~", time.Now(), 100*time.Millisecond))
-		})
-	})
-
-	Context("resetting", func() {
-		It("resets", func() {
-			const initialWindow protocol.ByteCount = 1337
-			controller.UpdateSendWindow(initialWindow)
-			controller.AddBytesSent(1000)
-			Expect(controller.SendWindowSize()).To(Equal(initialWindow - 1000))
-			Expect(controller.Reset()).To(Succeed())
-			Expect(controller.SendWindowSize()).To(Equal(initialWindow))
-		})
-
-		It("says if is blocked after resetting", func() {
-			const initialWindow protocol.ByteCount = 1337
-			controller.UpdateSendWindow(initialWindow)
-			controller.AddBytesSent(initialWindow)
-			blocked, _ := controller.IsNewlyBlocked()
-			Expect(blocked).To(BeTrue())
-			Expect(controller.Reset()).To(Succeed())
-			controller.AddBytesSent(initialWindow)
-			blocked, blockedAt := controller.IsNewlyBlocked()
-			Expect(blocked).To(BeTrue())
-			Expect(blockedAt).To(Equal(initialWindow))
-		})
-	})
-})
+func TestConnectionFlowControllerResetAfterReading(t *testing.T) {
+	fc := NewConnectionFlowController(0, 0, nil, &utils.RTTStats{}, utils.DefaultLogger)
+	fc.AddBytesRead(1)
+	require.EqualError(t, fc.Reset(), "flow controller reset after reading data")
+}

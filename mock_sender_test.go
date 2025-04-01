@@ -10,6 +10,7 @@
 package quic
 
 import (
+	net "net"
 	reflect "reflect"
 
 	gomock "go.uber.org/mock/gomock"
@@ -20,6 +21,7 @@ import (
 type MockSender struct {
 	ctrl     *gomock.Controller
 	recorder *MockSenderMockRecorder
+	isgomock struct{}
 }
 
 // MockSenderMockRecorder is the mock recorder for MockSender.
@@ -152,15 +154,15 @@ func (c *MockSenderRunCall) DoAndReturn(f func() error) *MockSenderRunCall {
 }
 
 // Send mocks base method.
-func (m *MockSender) Send(arg0 *packetBuffer, arg1 uint16, arg2 protocol.ECN) {
+func (m *MockSender) Send(p *packetBuffer, gsoSize uint16, ecn protocol.ECN) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Send", arg0, arg1, arg2)
+	m.ctrl.Call(m, "Send", p, gsoSize, ecn)
 }
 
 // Send indicates an expected call of Send.
-func (mr *MockSenderMockRecorder) Send(arg0, arg1, arg2 any) *MockSenderSendCall {
+func (mr *MockSenderMockRecorder) Send(p, gsoSize, ecn any) *MockSenderSendCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Send", reflect.TypeOf((*MockSender)(nil).Send), arg0, arg1, arg2)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Send", reflect.TypeOf((*MockSender)(nil).Send), p, gsoSize, ecn)
 	return &MockSenderSendCall{Call: call}
 }
 
@@ -183,6 +185,42 @@ func (c *MockSenderSendCall) Do(f func(*packetBuffer, uint16, protocol.ECN)) *Mo
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
 func (c *MockSenderSendCall) DoAndReturn(f func(*packetBuffer, uint16, protocol.ECN)) *MockSenderSendCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
+// SendProbe mocks base method.
+func (m *MockSender) SendProbe(arg0 *packetBuffer, arg1 net.Addr) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SendProbe", arg0, arg1)
+}
+
+// SendProbe indicates an expected call of SendProbe.
+func (mr *MockSenderMockRecorder) SendProbe(arg0, arg1 any) *MockSenderSendProbeCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendProbe", reflect.TypeOf((*MockSender)(nil).SendProbe), arg0, arg1)
+	return &MockSenderSendProbeCall{Call: call}
+}
+
+// MockSenderSendProbeCall wrap *gomock.Call
+type MockSenderSendProbeCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockSenderSendProbeCall) Return() *MockSenderSendProbeCall {
+	c.Call = c.Call.Return()
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockSenderSendProbeCall) Do(f func(*packetBuffer, net.Addr)) *MockSenderSendProbeCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockSenderSendProbeCall) DoAndReturn(f func(*packetBuffer, net.Addr)) *MockSenderSendProbeCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

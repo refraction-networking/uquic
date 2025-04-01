@@ -14,7 +14,6 @@ import (
 	net "net"
 	reflect "reflect"
 
-	qerr "github.com/refraction-networking/uquic/internal/qerr"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -22,6 +21,7 @@ import (
 type MockQUICConn struct {
 	ctrl     *gomock.Controller
 	recorder *MockQUICConnMockRecorder
+	isgomock struct{}
 }
 
 // MockQUICConnMockRecorder is the mock recorder for MockQUICConn.
@@ -120,7 +120,7 @@ func (c *MockQUICConnAcceptUniStreamCall) DoAndReturn(f func(context.Context) (R
 }
 
 // CloseWithError mocks base method.
-func (m *MockQUICConn) CloseWithError(arg0 qerr.ApplicationErrorCode, arg1 string) error {
+func (m *MockQUICConn) CloseWithError(arg0 ApplicationErrorCode, arg1 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "CloseWithError", arg0, arg1)
 	ret0, _ := ret[0].(error)
@@ -146,13 +146,13 @@ func (c *MockQUICConnCloseWithErrorCall) Return(arg0 error) *MockQUICConnCloseWi
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockQUICConnCloseWithErrorCall) Do(f func(qerr.ApplicationErrorCode, string) error) *MockQUICConnCloseWithErrorCall {
+func (c *MockQUICConnCloseWithErrorCall) Do(f func(ApplicationErrorCode, string) error) *MockQUICConnCloseWithErrorCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockQUICConnCloseWithErrorCall) DoAndReturn(f func(qerr.ApplicationErrorCode, string) error) *MockQUICConnCloseWithErrorCall {
+func (c *MockQUICConnCloseWithErrorCall) DoAndReturn(f func(ApplicationErrorCode, string) error) *MockQUICConnCloseWithErrorCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -310,17 +310,18 @@ func (c *MockQUICConnLocalAddrCall) DoAndReturn(f func() net.Addr) *MockQUICConn
 }
 
 // NextConnection mocks base method.
-func (m *MockQUICConn) NextConnection() Connection {
+func (m *MockQUICConn) NextConnection(arg0 context.Context) (Connection, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "NextConnection")
+	ret := m.ctrl.Call(m, "NextConnection", arg0)
 	ret0, _ := ret[0].(Connection)
-	return ret0
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // NextConnection indicates an expected call of NextConnection.
-func (mr *MockQUICConnMockRecorder) NextConnection() *MockQUICConnNextConnectionCall {
+func (mr *MockQUICConnMockRecorder) NextConnection(arg0 any) *MockQUICConnNextConnectionCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NextConnection", reflect.TypeOf((*MockQUICConn)(nil).NextConnection))
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NextConnection", reflect.TypeOf((*MockQUICConn)(nil).NextConnection), arg0)
 	return &MockQUICConnNextConnectionCall{Call: call}
 }
 
@@ -330,19 +331,19 @@ type MockQUICConnNextConnectionCall struct {
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockQUICConnNextConnectionCall) Return(arg0 Connection) *MockQUICConnNextConnectionCall {
-	c.Call = c.Call.Return(arg0)
+func (c *MockQUICConnNextConnectionCall) Return(arg0 Connection, arg1 error) *MockQUICConnNextConnectionCall {
+	c.Call = c.Call.Return(arg0, arg1)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockQUICConnNextConnectionCall) Do(f func() Connection) *MockQUICConnNextConnectionCall {
+func (c *MockQUICConnNextConnectionCall) Do(f func(context.Context) (Connection, error)) *MockQUICConnNextConnectionCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockQUICConnNextConnectionCall) DoAndReturn(f func() Connection) *MockQUICConnNextConnectionCall {
+func (c *MockQUICConnNextConnectionCall) DoAndReturn(f func(context.Context) (Connection, error)) *MockQUICConnNextConnectionCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }
@@ -581,17 +582,17 @@ func (c *MockQUICConnRemoteAddrCall) DoAndReturn(f func() net.Addr) *MockQUICCon
 }
 
 // SendDatagram mocks base method.
-func (m *MockQUICConn) SendDatagram(arg0 []byte) error {
+func (m *MockQUICConn) SendDatagram(payload []byte) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SendDatagram", arg0)
+	ret := m.ctrl.Call(m, "SendDatagram", payload)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // SendDatagram indicates an expected call of SendDatagram.
-func (mr *MockQUICConnMockRecorder) SendDatagram(arg0 any) *MockQUICConnSendDatagramCall {
+func (mr *MockQUICConnMockRecorder) SendDatagram(payload any) *MockQUICConnSendDatagramCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendDatagram", reflect.TypeOf((*MockQUICConn)(nil).SendDatagram), arg0)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendDatagram", reflect.TypeOf((*MockQUICConn)(nil).SendDatagram), payload)
 	return &MockQUICConnSendDatagramCall{Call: call}
 }
 
@@ -619,7 +620,7 @@ func (c *MockQUICConnSendDatagramCall) DoAndReturn(f func([]byte) error) *MockQU
 }
 
 // closeWithTransportError mocks base method.
-func (m *MockQUICConn) closeWithTransportError(arg0 qerr.TransportErrorCode) {
+func (m *MockQUICConn) closeWithTransportError(arg0 TransportErrorCode) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "closeWithTransportError", arg0)
 }
@@ -643,13 +644,13 @@ func (c *MockQUICConncloseWithTransportErrorCall) Return() *MockQUICConncloseWit
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockQUICConncloseWithTransportErrorCall) Do(f func(qerr.TransportErrorCode)) *MockQUICConncloseWithTransportErrorCall {
+func (c *MockQUICConncloseWithTransportErrorCall) Do(f func(TransportErrorCode)) *MockQUICConncloseWithTransportErrorCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockQUICConncloseWithTransportErrorCall) DoAndReturn(f func(qerr.TransportErrorCode)) *MockQUICConncloseWithTransportErrorCall {
+func (c *MockQUICConncloseWithTransportErrorCall) DoAndReturn(f func(TransportErrorCode)) *MockQUICConncloseWithTransportErrorCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

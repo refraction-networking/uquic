@@ -163,13 +163,13 @@ func main() {
 		go func() {
 			var err error
 			if *tcp {
-				err = http3.ListenAndServe(bCap, certFile, keyFile, handler)
+				err = http3.ListenAndServeTLS(bCap, certFile, keyFile, handler)
 			} else {
 				server := http3.Server{
 					Handler: handler,
 					Addr:    bCap,
-					QuicConfig: &quic.Config{
-						Tracer: qlog.DefaultTracer,
+					QUICConfig: &quic.Config{
+						Tracer: qlog.DefaultConnectionTracer,
 					},
 				}
 				err = server.ListenAndServeTLS(certFile, keyFile)

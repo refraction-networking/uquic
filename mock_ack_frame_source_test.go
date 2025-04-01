@@ -11,6 +11,7 @@ package quic
 
 import (
 	reflect "reflect"
+	time "time"
 
 	gomock "go.uber.org/mock/gomock"
 	protocol "github.com/refraction-networking/uquic/internal/protocol"
@@ -21,6 +22,7 @@ import (
 type MockAckFrameSource struct {
 	ctrl     *gomock.Controller
 	recorder *MockAckFrameSourceMockRecorder
+	isgomock struct{}
 }
 
 // MockAckFrameSourceMockRecorder is the mock recorder for MockAckFrameSource.
@@ -41,17 +43,17 @@ func (m *MockAckFrameSource) EXPECT() *MockAckFrameSourceMockRecorder {
 }
 
 // GetAckFrame mocks base method.
-func (m *MockAckFrameSource) GetAckFrame(arg0 protocol.EncryptionLevel, arg1 bool) *wire.AckFrame {
+func (m *MockAckFrameSource) GetAckFrame(arg0 protocol.EncryptionLevel, now time.Time, onlyIfQueued bool) *wire.AckFrame {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetAckFrame", arg0, arg1)
+	ret := m.ctrl.Call(m, "GetAckFrame", arg0, now, onlyIfQueued)
 	ret0, _ := ret[0].(*wire.AckFrame)
 	return ret0
 }
 
 // GetAckFrame indicates an expected call of GetAckFrame.
-func (mr *MockAckFrameSourceMockRecorder) GetAckFrame(arg0, arg1 any) *MockAckFrameSourceGetAckFrameCall {
+func (mr *MockAckFrameSourceMockRecorder) GetAckFrame(arg0, now, onlyIfQueued any) *MockAckFrameSourceGetAckFrameCall {
 	mr.mock.ctrl.T.Helper()
-	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAckFrame", reflect.TypeOf((*MockAckFrameSource)(nil).GetAckFrame), arg0, arg1)
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetAckFrame", reflect.TypeOf((*MockAckFrameSource)(nil).GetAckFrame), arg0, now, onlyIfQueued)
 	return &MockAckFrameSourceGetAckFrameCall{Call: call}
 }
 
@@ -67,13 +69,13 @@ func (c *MockAckFrameSourceGetAckFrameCall) Return(arg0 *wire.AckFrame) *MockAck
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockAckFrameSourceGetAckFrameCall) Do(f func(protocol.EncryptionLevel, bool) *wire.AckFrame) *MockAckFrameSourceGetAckFrameCall {
+func (c *MockAckFrameSourceGetAckFrameCall) Do(f func(protocol.EncryptionLevel, time.Time, bool) *wire.AckFrame) *MockAckFrameSourceGetAckFrameCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockAckFrameSourceGetAckFrameCall) DoAndReturn(f func(protocol.EncryptionLevel, bool) *wire.AckFrame) *MockAckFrameSourceGetAckFrameCall {
+func (c *MockAckFrameSourceGetAckFrameCall) DoAndReturn(f func(protocol.EncryptionLevel, time.Time, bool) *wire.AckFrame) *MockAckFrameSourceGetAckFrameCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

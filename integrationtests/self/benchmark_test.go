@@ -2,20 +2,19 @@ package self_test
 
 import (
 	"context"
-	"fmt"
-	"net"
 	"testing"
+	"time"
 
 	quic "github.com/refraction-networking/uquic"
+
+	"github.com/stretchr/testify/require"
 )
 
 func BenchmarkHandshake(b *testing.B) {
 	b.ReportAllocs()
 
-	ln, err := quic.ListenAddr("localhost:0", tlsConfig, nil)
-	if err != nil {
-		b.Fatal(err)
-	}
+	ln, err := quic.Listen(newUPDConnLocalhost(b), tlsConfig, nil)
+	require.NoError(b, err)
 	defer ln.Close()
 
 	connChan := make(chan quic.Connection, 1)
@@ -29,18 +28,15 @@ func BenchmarkHandshake(b *testing.B) {
 		}
 	}()
 
-	conn, err := net.ListenUDP("udp", nil)
-	if err != nil {
-		b.Fatal(err)
-	}
+	tr := &quic.Transport{Conn: newUPDConnLocalhost(b)}
+	defer tr.Close()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		c, err := quic.Dial(context.Background(), conn, ln.Addr(), tlsClientConfig, nil)
-		if err != nil {
-			b.Fatal(err)
-		}
-		<-connChan
+		c, err := tr.Dial(context.Background(), ln.Addr(), tlsClientConfig, nil)
+		require.NoError(b, err)
+		serverConn := <-connChan
+		serverConn.CloseWithError(0, "")
 		c.CloseWithError(0, "")
 	}
 }
@@ -48,22 +44,23 @@ func BenchmarkHandshake(b *testing.B) {
 func BenchmarkStreamChurn(b *testing.B) {
 	b.ReportAllocs()
 
-	ln, err := quic.ListenAddr("localhost:0", tlsConfig, &quic.Config{MaxIncomingStreams: 1e10})
-	if err != nil {
-		b.Fatal(err)
-	}
+	ln, err := quic.Listen(newUPDConnLocalhost(b), tlsConfig, &quic.Config{MaxIncomingStreams: 1e10})
+	require.NoError(b, err)
 	defer ln.Close()
 
-	errChan := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := quic.Dial(ctx, newUPDConnLocalhost(b), ln.Addr(), tlsClientConfig, nil)
+	require.NoError(b, err)
+	defer conn.CloseWithError(0, "")
+
+	serverConn, err := ln.Accept(context.Background())
+	require.NoError(b, err)
+	defer serverConn.CloseWithError(0, "")
+
 	go func() {
-		conn, err := ln.Accept(context.Background())
-		if err != nil {
-			errChan <- err
-			return
-		}
-		close(errChan)
 		for {
-			str, err := conn.AcceptStream(context.Background())
+			str, err := serverConn.AcceptStream(context.Background())
 			if err != nil {
 				return
 			}
@@ -71,22 +68,10 @@ func BenchmarkStreamChurn(b *testing.B) {
 		}
 	}()
 
-	c, err := quic.DialAddr(context.Background(), fmt.Sprintf("localhost:%d", ln.Addr().(*net.UDPAddr).Port), tlsClientConfig, nil)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if err := <-errChan; err != nil {
-		b.Fatal(err)
-	}
-
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		str, err := c.OpenStreamSync(context.Background())
-		if err != nil {
-			b.Fatal(err)
-		}
-		if err := str.Close(); err != nil {
-			b.Fatal(err)
-		}
+		str, err := conn.OpenStreamSync(context.Background())
+		require.NoError(b, err)
+		require.NoError(b, str.Close())
 	}
 }

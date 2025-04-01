@@ -1,140 +1,101 @@
 package quic
 
 import (
-	"fmt"
+	"testing"
 
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/qerr"
 	"github.com/refraction-networking/uquic/internal/wire"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
 )
 
-var _ = Describe("Crypto Stream", func() {
-	var str cryptoStream
+func TestCryptoStreamDataAssembly(t *testing.T) {
+	str := newCryptoStream()
+	require.NoError(t, str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("bar"), Offset: 3}))
+	require.NoError(t, str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("foo")}))
+	// receive a retransmission
+	require.NoError(t, str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("bar"), Offset: 3}))
 
-	BeforeEach(func() {
-		str = newCryptoStream()
+	var data []byte
+	for {
+		b := str.GetCryptoData()
+		if b == nil {
+			break
+		}
+		data = append(data, b...)
+	}
+	require.Equal(t, []byte("foobar"), data)
+}
+
+func TestCryptoStreamMaxOffset(t *testing.T) {
+	str := newCryptoStream()
+	require.NoError(t, str.HandleCryptoFrame(&wire.CryptoFrame{
+		Offset: protocol.MaxCryptoStreamOffset - 5,
+		Data:   []byte("foo"),
+	}))
+	require.ErrorIs(t,
+		str.HandleCryptoFrame(&wire.CryptoFrame{
+			Offset: protocol.MaxCryptoStreamOffset - 2,
+			Data:   []byte("bar"),
+		}),
+		&qerr.TransportError{ErrorCode: qerr.CryptoBufferExceeded},
+	)
+}
+
+func TestCryptoStreamFinishWithQueuedData(t *testing.T) {
+	t.Run("with data at current offset", func(t *testing.T) {
+		str := newCryptoStream()
+		require.NoError(t, str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("foo")}))
+		require.Equal(t, []byte("foo"), str.GetCryptoData())
+		require.NoError(t, str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("bar"), Offset: 3}))
+		require.ErrorIs(t, str.Finish(), &qerr.TransportError{ErrorCode: qerr.ProtocolViolation})
 	})
 
-	Context("handling incoming data", func() {
-		It("handles in-order CRYPTO frames", func() {
-			Expect(str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("foo")})).To(Succeed())
-			Expect(str.GetCryptoData()).To(Equal([]byte("foo")))
-			Expect(str.GetCryptoData()).To(BeNil())
-			Expect(str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("bar"), Offset: 3})).To(Succeed())
-			Expect(str.GetCryptoData()).To(Equal([]byte("bar")))
-			Expect(str.GetCryptoData()).To(BeNil())
-		})
-
-		It("errors if the frame exceeds the maximum offset", func() {
-			Expect(str.HandleCryptoFrame(&wire.CryptoFrame{
-				Offset: protocol.MaxCryptoStreamOffset - 5,
-				Data:   []byte("foobar"),
-			})).To(MatchError(&qerr.TransportError{
-				ErrorCode:    qerr.CryptoBufferExceeded,
-				ErrorMessage: fmt.Sprintf("received invalid offset %d on crypto stream, maximum allowed %d", protocol.MaxCryptoStreamOffset+1, protocol.MaxCryptoStreamOffset),
-			}))
-		})
-
-		It("handles out-of-order CRYPTO frames", func() {
-			Expect(str.HandleCryptoFrame(&wire.CryptoFrame{Offset: 3, Data: []byte("bar")})).To(Succeed())
-			Expect(str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("foo")})).To(Succeed())
-			Expect(str.GetCryptoData()).To(Equal([]byte("foobar")))
-			Expect(str.GetCryptoData()).To(BeNil())
-		})
-
-		Context("finishing", func() {
-			It("errors if there's still data to read after finishing", func() {
-				Expect(str.HandleCryptoFrame(&wire.CryptoFrame{
-					Data:   []byte("foobar"),
-					Offset: 10,
-				})).To(Succeed())
-				Expect(str.Finish()).To(MatchError(&qerr.TransportError{
-					ErrorCode:    qerr.ProtocolViolation,
-					ErrorMessage: "encryption level changed, but crypto stream has more data to read",
-				}))
-			})
-
-			It("works with reordered data", func() {
-				f1 := &wire.CryptoFrame{
-					Data: []byte("foo"),
-				}
-				f2 := &wire.CryptoFrame{
-					Offset: 3,
-					Data:   []byte("bar"),
-				}
-				Expect(str.HandleCryptoFrame(f2)).To(Succeed())
-				Expect(str.HandleCryptoFrame(f1)).To(Succeed())
-				Expect(str.Finish()).To(Succeed())
-				Expect(str.HandleCryptoFrame(f2)).To(Succeed())
-			})
-
-			It("rejects new crypto data after finishing", func() {
-				Expect(str.Finish()).To(Succeed())
-				Expect(str.HandleCryptoFrame(&wire.CryptoFrame{
-					Data: []byte("foo"),
-				})).To(MatchError(&qerr.TransportError{
-					ErrorCode:    qerr.ProtocolViolation,
-					ErrorMessage: "received crypto data after change of encryption level",
-				}))
-			})
-
-			It("ignores crypto data below the maximum offset received before finishing", func() {
-				Expect(str.HandleCryptoFrame(&wire.CryptoFrame{
-					Data: []byte("foobar"),
-				})).To(Succeed())
-				Expect(str.GetCryptoData()).To(Equal([]byte("foobar")))
-				Expect(str.Finish()).To(Succeed())
-				Expect(str.HandleCryptoFrame(&wire.CryptoFrame{
-					Offset: 2,
-					Data:   []byte("foo"),
-				})).To(Succeed())
-			})
-		})
+	t.Run("with data at a higher offset", func(t *testing.T) {
+		str := newCryptoStream()
+		require.NoError(t, str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("foobar"), Offset: 20}))
+		require.ErrorIs(t, str.Finish(), &qerr.TransportError{ErrorCode: qerr.ProtocolViolation})
 	})
+}
 
-	Context("writing data", func() {
-		It("says if it has data", func() {
-			Expect(str.HasData()).To(BeFalse())
-			_, err := str.Write([]byte("foobar"))
-			Expect(err).ToNot(HaveOccurred())
-			Expect(str.HasData()).To(BeTrue())
-		})
+func TestCryptoStreamReceiveDataAfterFinish(t *testing.T) {
+	str := newCryptoStream()
+	require.NoError(t, str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("foobar")}))
+	require.Equal(t, []byte("foobar"), str.GetCryptoData())
+	require.NoError(t, str.Finish())
+	// receiving a retransmission is ok
+	require.NoError(t, str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("bar"), Offset: 3}))
+	// but receiving new data is not
+	require.ErrorIs(t,
+		str.HandleCryptoFrame(&wire.CryptoFrame{Data: []byte("baz"), Offset: 4}),
+		&qerr.TransportError{ErrorCode: qerr.ProtocolViolation},
+	)
+}
 
-		It("pops crypto frames", func() {
-			_, err := str.Write([]byte("foobar"))
-			Expect(err).ToNot(HaveOccurred())
-			f := str.PopCryptoFrame(1000)
-			Expect(f).ToNot(BeNil())
-			Expect(f.Offset).To(BeZero())
-			Expect(f.Data).To(Equal([]byte("foobar")))
-		})
+func TestCryptoStreamWrite(t *testing.T) {
+	expectedCryptoFrameLen := func(offset protocol.ByteCount) protocol.ByteCount {
+		f := &wire.CryptoFrame{Offset: offset}
+		return f.Length(protocol.Version1)
+	}
 
-		It("coalesces multiple writes", func() {
-			_, err := str.Write([]byte("foo"))
-			Expect(err).ToNot(HaveOccurred())
-			_, err = str.Write([]byte("bar"))
-			Expect(err).ToNot(HaveOccurred())
-			f := str.PopCryptoFrame(1000)
-			Expect(f).ToNot(BeNil())
-			Expect(f.Offset).To(BeZero())
-			Expect(f.Data).To(Equal([]byte("foobar")))
-		})
+	str := newCryptoStream()
 
-		It("respects the maximum size", func() {
-			frameHeaderLen := (&wire.CryptoFrame{}).Length(protocol.Version1)
-			_, err := str.Write([]byte("foobar"))
-			Expect(err).ToNot(HaveOccurred())
-			f := str.PopCryptoFrame(frameHeaderLen + 3)
-			Expect(f).ToNot(BeNil())
-			Expect(f.Offset).To(BeZero())
-			Expect(f.Data).To(Equal([]byte("foo")))
-			f = str.PopCryptoFrame(frameHeaderLen + 3)
-			Expect(f).ToNot(BeNil())
-			Expect(f.Offset).To(Equal(protocol.ByteCount(3)))
-			Expect(f.Data).To(Equal([]byte("bar")))
-		})
-	})
-})
+	require.False(t, str.HasData())
+	_, err := str.Write([]byte("foo"))
+	require.NoError(t, err)
+	require.True(t, str.HasData())
+	_, err = str.Write([]byte("bar"))
+	require.NoError(t, err)
+	_, err = str.Write([]byte("baz"))
+	require.NoError(t, err)
+	require.True(t, str.HasData())
+
+	f := str.PopCryptoFrame(expectedCryptoFrameLen(0) + 3)
+	require.Equal(t, &wire.CryptoFrame{Data: []byte("foo")}, f)
+	require.True(t, str.HasData())
+	f = str.PopCryptoFrame(protocol.MaxByteCount)
+	// the two write calls were coalesced into a single frame
+	require.Equal(t, &wire.CryptoFrame{Offset: 3, Data: []byte("barbaz")}, f)
+	require.False(t, str.HasData())
+}

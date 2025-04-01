@@ -64,9 +64,9 @@ func (c category) String() string {
 	}
 }
 
-type versionNumber protocol.Version
+type version protocol.Version
 
-func (v versionNumber) String() string {
+func (v version) String() string {
 	return fmt.Sprintf("%x", uint32(v))
 }
 
@@ -291,6 +291,8 @@ func (t timerType) String() string {
 		return "ack"
 	case logging.TimerTypePTO:
 		return "pto"
+	case logging.TimerTypePathProbe:
+		return "path_probe"
 	default:
 		return "unknown timer type"
 	}

@@ -9,7 +9,6 @@ import (
 
 	quic "github.com/refraction-networking/uquic"
 	"github.com/refraction-networking/uquic/internal/protocol"
-	"github.com/refraction-networking/uquic/internal/utils"
 	"github.com/refraction-networking/uquic/logging"
 
 	"github.com/francoispqt/gojay"
@@ -37,7 +36,7 @@ func (e event) MarshalJSONObject(enc *gojay.Encoder) {
 	enc.ObjectKey("data", e.eventDetails)
 }
 
-type versions []versionNumber
+type versions []version
 
 func (v versions) IsNil() bool { return false }
 func (v versions) MarshalJSONArray(enc *gojay.Encoder) {
@@ -72,7 +71,7 @@ func (e eventConnectionStarted) Name() string       { return "connection_started
 func (e eventConnectionStarted) IsNil() bool        { return false }
 
 func (e eventConnectionStarted) MarshalJSONObject(enc *gojay.Encoder) {
-	if utils.IsIPv4(e.SrcAddr.IP) {
+	if e.SrcAddr.IP.To4() != nil {
 		enc.StringKey("ip_version", "ipv4")
 	} else {
 		enc.StringKey("ip_version", "ipv6")
@@ -86,8 +85,8 @@ func (e eventConnectionStarted) MarshalJSONObject(enc *gojay.Encoder) {
 }
 
 type eventVersionNegotiated struct {
-	clientVersions, serverVersions []versionNumber
-	chosenVersion                  versionNumber
+	clientVersions, serverVersions []version
+	chosenVersion                  version
 }
 
 func (e eventVersionNegotiated) Category() category { return categoryTransport }
@@ -125,7 +124,6 @@ func (e eventConnectionClosed) MarshalJSONObject(enc *gojay.Encoder) {
 	case errors.As(e.e, &statelessResetErr):
 		enc.StringKey("owner", ownerRemote.String())
 		enc.StringKey("trigger", "stateless_reset")
-		enc.StringKey("stateless_reset_token", fmt.Sprintf("%x", statelessResetErr.Token))
 	case errors.As(e.e, &handshakeTimeoutErr):
 		enc.StringKey("owner", ownerLocal.String())
 		enc.StringKey("trigger", "handshake_timeout")
@@ -221,7 +219,7 @@ func (e eventRetryReceived) MarshalJSONObject(enc *gojay.Encoder) {
 
 type eventVersionNegotiationReceived struct {
 	Header            packetHeaderVersionNegotiation
-	SupportedVersions []versionNumber
+	SupportedVersions []version
 }
 
 func (e eventVersionNegotiationReceived) Category() category { return categoryTransport }
@@ -235,7 +233,7 @@ func (e eventVersionNegotiationReceived) MarshalJSONObject(enc *gojay.Encoder) {
 
 type eventVersionNegotiationSent struct {
 	Header            packetHeaderVersionNegotiation
-	SupportedVersions []versionNumber
+	SupportedVersions []version
 }
 
 func (e eventVersionNegotiationSent) Category() category { return categoryTransport }
@@ -294,6 +292,20 @@ type metrics struct {
 	PacketsInFlight  int
 }
 
+type eventMTUUpdated struct {
+	mtu  protocol.ByteCount
+	done bool
+}
+
+func (e eventMTUUpdated) Category() category { return categoryRecovery }
+func (e eventMTUUpdated) Name() string       { return "mtu_updated" }
+func (e eventMTUUpdated) IsNil() bool        { return false }
+
+func (e eventMTUUpdated) MarshalJSONObject(enc *gojay.Encoder) {
+	enc.Uint64Key("mtu", uint64(e.mtu))
+	enc.BoolKey("done", e.done)
+}
+
 type eventMetricsUpdated struct {
 	Last    *metrics
 	Current *metrics
@@ -324,7 +336,7 @@ func (e eventMetricsUpdated) MarshalJSONObject(enc *gojay.Encoder) {
 		enc.Uint64Key("bytes_in_flight", uint64(e.Current.BytesInFlight))
 	}
 	if e.Last == nil || e.Last.PacketsInFlight != e.Current.PacketsInFlight {
-		enc.Uint64KeyOmitEmpty("packets_in_flight", uint64(e.Current.PacketsInFlight))
+		enc.Uint64Key("packets_in_flight", uint64(e.Current.PacketsInFlight))
 	}
 }
 
