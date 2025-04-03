@@ -1,8 +1,9 @@
 package protocol
 
 import (
-	"crypto/tls"
 	"testing"
+
+	tls "github.com/refraction-networking/utls"
 
 	"github.com/stretchr/testify/require"
 )

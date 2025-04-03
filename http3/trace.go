@@ -1,11 +1,13 @@
 package http3
 
 import (
-	"crypto/tls"
+	gotls "crypto/tls"
 	"net"
 	"net/http/httptrace"
 	"net/textproto"
 	"time"
+
+	tls "github.com/refraction-networking/utls"
 
 	quic "github.com/refraction-networking/uquic"
 )
@@ -100,6 +102,20 @@ func traceTLSHandshakeStart(trace *httptrace.ClientTrace) {
 
 func traceTLSHandshakeDone(trace *httptrace.ClientTrace, state tls.ConnectionState, err error) {
 	if trace != nil && trace.TLSHandshakeDone != nil {
-		trace.TLSHandshakeDone(state, err)
+		trace.TLSHandshakeDone(gotls.ConnectionState{
+			Version:                     state.Version,
+			HandshakeComplete:           state.HandshakeComplete,
+			DidResume:                   state.DidResume,
+			CipherSuite:                 state.CipherSuite,
+			NegotiatedProtocol:          state.NegotiatedProtocol,
+			NegotiatedProtocolIsMutual:  state.NegotiatedProtocolIsMutual,
+			ServerName:                  state.ServerName,
+			PeerCertificates:            state.PeerCertificates,
+			VerifiedChains:              state.VerifiedChains,
+			SignedCertificateTimestamps: state.SignedCertificateTimestamps,
+			OCSPResponse:                state.OCSPResponse,
+			TLSUnique:                   state.TLSUnique,
+			ECHAccepted:                 state.ECHAccepted,
+		}, err)
 	}
 }

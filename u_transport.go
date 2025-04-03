@@ -2,10 +2,12 @@ package quic
 
 import (
 	"context"
+	"errors"
 	"net"
 
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/utils"
+	"github.com/refraction-networking/uquic/logging"
 	tls "github.com/refraction-networking/utls"
 )
 
@@ -26,6 +28,9 @@ func (t *UTransport) DialEarly(ctx context.Context, addr net.Addr, tlsConf *tls.
 }
 
 func (t *UTransport) dial(ctx context.Context, addr net.Addr, host string, tlsConf *tls.Config, conf *Config, use0RTT bool) (EarlyConnection, error) {
+	if err := t.init(t.isSingleUse); err != nil {
+		return nil, err
+	}
 	if err := validateConfig(conf); err != nil {
 		return nil, err
 	}
@@ -42,17 +47,155 @@ func (t *UTransport) dial(ctx context.Context, addr net.Addr, host string, tlsCo
 	}
 	// [/UQUIC]
 
-	if err := t.init(t.isSingleUse); err != nil {
+	tlsConf = tlsConf.Clone()
+	setTLSConfigServerName(tlsConf, addr, host)
+	return t.doDial(ctx,
+		newSendConn(t.conn, addr, packetInfo{}, utils.DefaultLogger),
+		tlsConf,
+		conf,
+		0,
+		false,
+		use0RTT,
+		conf.Versions[0],
+	)
+}
+
+func (t *UTransport) doDial(
+	ctx context.Context,
+	sendConn sendConn,
+	tlsConf *tls.Config,
+	config *Config,
+	initialPacketNumber protocol.PacketNumber,
+	hasNegotiatedVersion bool,
+	use0RTT bool,
+	version protocol.Version,
+) (quicConn, error) {
+	srcConnID, err := t.connIDGenerator.GenerateConnectionID()
+	if err != nil {
 		return nil, err
 	}
-	var onClose func()
-	if t.isSingleUse {
-		onClose = func() { t.Close() }
+	destConnID, err := generateConnectionIDForInitial()
+	if err != nil {
+		return nil, err
 	}
-	tlsConf = tlsConf.Clone()
-	tlsConf.MinVersion = tls.VersionTLS13
-	setTLSConfigServerName(tlsConf, addr, host)
-	return udial(ctx, newSendConn(t.conn, addr, packetInfo{}, utils.DefaultLogger), t.connIDGenerator, t.handlerMap, tlsConf, conf, onClose, use0RTT, t.QUICSpec)
+
+	tracingID := nextConnTracingID()
+	ctx = context.WithValue(ctx, ConnectionTracingKey, tracingID)
+
+	t.mutex.Lock()
+	if t.closeErr != nil {
+		t.mutex.Unlock()
+		return nil, t.closeErr
+	}
+
+	var tracer *logging.ConnectionTracer
+	if config.Tracer != nil {
+		tracer = config.Tracer(ctx, protocol.PerspectiveClient, destConnID)
+	}
+	if tracer != nil && tracer.StartedConnection != nil {
+		tracer.StartedConnection(sendConn.LocalAddr(), sendConn.RemoteAddr(), srcConnID, destConnID)
+	}
+
+	logger := utils.DefaultLogger.WithPrefix("client")
+	logger.Infof("Starting new connection to %s (%s -> %s), source connection ID %s, destination connection ID %s, version %s", tlsConf.ServerName, sendConn.LocalAddr(), sendConn.RemoteAddr(), srcConnID, destConnID, version)
+
+	// [uQUIC SECTION BEGIN]
+	var conn quicConn
+	if t.QUICSpec == nil {
+		conn = newClientConnection(
+			context.WithoutCancel(ctx),
+			sendConn,
+			t.handlerMap,
+			destConnID,
+			srcConnID,
+			t.connIDGenerator,
+			t.statelessResetter,
+			config,
+			tlsConf,
+			initialPacketNumber,
+			use0RTT,
+			hasNegotiatedVersion,
+			tracer,
+			logger,
+			version,
+		)
+	} else {
+		conn = newUClientConnection(
+			context.WithoutCancel(ctx),
+			sendConn,
+			t.handlerMap,
+			destConnID,
+			srcConnID,
+			t.connIDGenerator,
+			t.statelessResetter,
+			config,
+			tlsConf,
+			initialPacketNumber,
+			use0RTT,
+			hasNegotiatedVersion,
+			tracer,
+			logger,
+			version,
+			t.QUICSpec,
+		)
+	}
+	// [uQUIC SECTION END]
+
+	t.handlerMap.Add(srcConnID, conn)
+	t.mutex.Unlock()
+
+	// The error channel needs to be buffered, as the run loop will continue running
+	// after doDial returns (if the handshake is successful).
+	errChan := make(chan error, 1)
+	recreateChan := make(chan errCloseForRecreating)
+	go func() {
+		err := conn.run()
+		var recreateErr *errCloseForRecreating
+		if errors.As(err, &recreateErr) {
+			recreateChan <- *recreateErr
+			return
+		}
+		if t.isSingleUse {
+			t.Close()
+		}
+		errChan <- err
+	}()
+
+	// Only set when we're using 0-RTT.
+	// Otherwise, earlyConnChan will be nil. Receiving from a nil chan blocks forever.
+	var earlyConnChan <-chan struct{}
+	if use0RTT {
+		earlyConnChan = conn.earlyConnReady()
+	}
+
+	select {
+	case <-ctx.Done():
+		conn.destroy(nil)
+		// wait until the Go routine that called Connection.run() returns
+		select {
+		case <-errChan:
+		case <-recreateChan:
+		}
+		return nil, context.Cause(ctx)
+	case params := <-recreateChan:
+		return t.doDial(ctx,
+			sendConn,
+			tlsConf,
+			config,
+			params.nextPacketNumber,
+			true,
+			use0RTT,
+			params.nextVersion,
+		)
+	case err := <-errChan:
+		return nil, err
+	case <-earlyConnChan:
+		// ready to send 0-RTT data
+		return conn, nil
+	case <-conn.HandshakeComplete():
+		// handshake successfully completed
+		return conn, nil
+	}
 }
 
 func (ut *UTransport) MakeDialer() func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *Config) (EarlyConnection, error) {

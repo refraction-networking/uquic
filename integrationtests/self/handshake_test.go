@@ -4,16 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
 	"time"
 
+	tls "github.com/refraction-networking/utls"
+
 	quic "github.com/refraction-networking/uquic"
 	quicproxy "github.com/refraction-networking/uquic/integrationtests/tools/proxy"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/qerr"
-	tls "github.com/refraction-networking/utls"
+	"github.com/refraction-networking/uquic/internal/qtls"
 
 	"github.com/stretchr/testify/require"
 )

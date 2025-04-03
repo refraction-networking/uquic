@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 
@@ -30,31 +32,49 @@ func main() {
 
 	quicConf := &quic.Config{}
 
-	roundTripper := &http3.RoundTripper{
-		TLSClientConfig: tlsConf,
-		QuicConfig:      quicConf,
-	}
-
 	quicSpec, err := quic.QUICID2Spec(quic.QUICFirefox_116)
 	// quicSpec, err := quic.QUICID2Spec(quic.QUICChrome_115)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	uRoundTripper := http3.GetURoundTripper(
-		roundTripper,
-		&quicSpec,
-		// getCRQUICSpec(),
-		nil,
-	)
-	defer uRoundTripper.Close()
+	transport := &http3.Transport{
+		TLSClientConfig: tlsConf,
+		QUICConfig:      quicConf,
+		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+			udpConn, err := net.ListenUDP("udp", nil)
+			if err != nil {
+				return nil, err
+			}
 
-	hclient := &http.Client{
-		Transport: uRoundTripper,
+			network := "udp"
+			ut := &quic.UTransport{
+				Transport: &quic.Transport{
+					Conn: udpConn,
+				},
+				QUICSpec: &quicSpec,
+			}
+
+			udpAddr, err := net.ResolveUDPAddr(network, addr)
+			if err != nil {
+				return nil, err
+			}
+
+			conn, err := ut.DialEarly(ctx, udpAddr, tlsCfg, cfg)
+
+			return conn, err
+
+		},
 	}
 
-	addr := "https://quic.tlsfingerprint.io/qfp/?beautify=true"
-	// addr := "https://www.cloudflare.com"
+	defer transport.Close()
+
+	hclient := &http.Client{
+		Transport: transport,
+	}
+
+	// addr := "https://quic.tlsfingerprint.io/qfp/?beautify=true"
+	addr := "https://www.cloudflare.com"
 
 	rsp, err := hclient.Get(addr)
 	if err != nil {

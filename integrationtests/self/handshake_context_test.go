@@ -2,10 +2,11 @@ package self_test
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"testing"
 	"time"
+
+	tls "github.com/refraction-networking/utls"
 
 	quic "github.com/refraction-networking/uquic"
 	"github.com/refraction-networking/uquic/logging"

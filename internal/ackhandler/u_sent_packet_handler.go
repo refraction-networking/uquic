@@ -19,7 +19,7 @@ func (h *uSentPacketHandler) PeekPacketNumber(encLevel protocol.EncryptionLevel)
 	}
 	// [/UQUIC]
 
-	return pn, protocol.GetPacketNumberLengthForHeader(pn, pnSpace.largestAcked)
+	return pn, protocol.PacketNumberLengthForHeader(pn, pnSpace.largestAcked)
 }
 
 // [UQUIC]

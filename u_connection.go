@@ -14,18 +14,19 @@ import (
 
 // [UQUIC]
 var newUClientConnection = func(
+	ctx context.Context,
 	conn sendConn,
 	runner connRunner,
 	destConnID protocol.ConnectionID,
 	srcConnID protocol.ConnectionID,
 	connIDGenerator ConnectionIDGenerator,
+	statelessResetter *statelessResetter,
 	conf *Config,
 	tlsConf *tls.Config,
 	initialPacketNumber protocol.PacketNumber,
 	enable0RTT bool,
 	hasNegotiatedVersion bool,
 	tracer *logging.ConnectionTracer,
-	tracingID uint64,
 	logger utils.Logger,
 	v protocol.Version,
 	uSpec *QUICSpec, // [UQUIC]
@@ -54,18 +55,18 @@ var newUClientConnection = func(
 		srcConnID,
 		nil,
 		func(connID protocol.ConnectionID) { runner.Add(connID, s) },
-		runner.GetStatelessResetToken,
+		statelessResetter,
 		runner.Remove,
 		runner.Retire,
 		runner.ReplaceWithClosed,
 		s.queueControlFrame,
 		connIDGenerator,
 	)
+	s.ctx, s.ctxCancel = context.WithCancelCause(ctx)
 	s.preSetup()
-	s.ctx, s.ctxCancel = context.WithCancelCause(context.WithValue(context.Background(), ConnectionTracingKey, tracingID))
 	s.sentPacketHandler, s.receivedPacketHandler = ackhandler.NewUAckHandler(
 		initialPacketNumber,
-		getMaxPacketSize(s.conn.RemoteAddr()),
+		protocol.ByteCount(s.config.InitialPacketSize),
 		s.rttStats,
 		false, // has no effect
 		s.conn.capabilities().ECN,
@@ -73,12 +74,12 @@ var newUClientConnection = func(
 		s.tracer,
 		s.logger,
 	)
+	s.currentMTUEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
 	// [UQUIC]
 	if uSpec.InitialPacketSpec.InitPacketNumberLength != 0 {
 		ackhandler.SetInitialPacketNumberLength(s.sentPacketHandler, uSpec.InitialPacketSpec.InitPacketNumberLength)
 	}
 
-	s.mtuDiscoverer = newMTUDiscoverer(s.rttStats, getMaxPacketSize(s.conn.RemoteAddr()), s.sentPacketHandler.SetMaxDatagramSize)
 	oneRTTStream := newCryptoStream()
 
 	var params *wire.TransportParameters
@@ -115,6 +116,7 @@ var newUClientConnection = func(
 			MaxBidiStreamNum:               protocol.StreamNum(s.config.MaxIncomingStreams),
 			MaxUniStreamNum:                protocol.StreamNum(s.config.MaxIncomingUniStreams),
 			MaxAckDelay:                    protocol.MaxAckDelayInclGranularity,
+			MaxUDPPayloadSize:              protocol.MaxPacketBufferSize,
 			AckDelayExponent:               protocol.AckDelayExponent,
 			DisableActiveMigration:         true,
 			// For interoperability with quic-go versions before May 2023, this value must be set to a value
@@ -146,7 +148,7 @@ var newUClientConnection = func(
 		uSpec.ClientHelloSpec,
 	)
 	s.cryptoStreamHandler = cs
-	s.cryptoStreamManager = newCryptoStreamManager(cs, s.initialStream, s.handshakeStream, oneRTTStream)
+	s.cryptoStreamManager = newCryptoStreamManager(s.initialStream, s.handshakeStream, oneRTTStream)
 	s.unpacker = newPacketUnpacker(cs, s.srcConnIDLen)
 	s.packer = newUPacketPacker(
 		newPacketPacker(srcConnID, s.connIDManager.Get, s.initialStream, s.handshakeStream, s.sentPacketHandler, s.retransmissionQueue, cs, s.framer, s.receivedPacketHandler, s.datagramQueue, s.perspective),

@@ -1,8 +1,9 @@
 package protocol
 
 import (
-	"crypto/tls"
 	"fmt"
+
+	tls "github.com/refraction-networking/utls"
 )
 
 // EncryptionLevel is the encryption level

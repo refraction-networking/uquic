@@ -3,7 +3,6 @@ package http3
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"errors"
 	"io"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	mockquic "github.com/refraction-networking/uquic/internal/mocks/quic"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/qerr"
+	tls "github.com/refraction-networking/utls"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"

@@ -7,13 +7,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	tls "github.com/refraction-networking/utls"
+
 	"github.com/refraction-networking/uquic/internal/protocol"
-	"github.com/refraction-networking/uquic/internal/qtls"
 	"github.com/refraction-networking/uquic/internal/utils"
 	"github.com/refraction-networking/uquic/internal/wire"
 	"github.com/refraction-networking/uquic/logging"
 	"github.com/refraction-networking/uquic/quicvarint"
-	tls "github.com/refraction-networking/utls"
 )
 
 type uCryptoSetup struct {
@@ -82,12 +82,14 @@ func NewUCryptoSetupClient(
 
 	tlsConf = tlsConf.Clone()
 	tlsConf.MinVersion = tls.VersionTLS13
-	quicConf := &tls.QUICConfig{TLSConfig: tlsConf}
-	qtls.SetupConfigForClient(quicConf, cs.marshalDataForSessionState, cs.handleDataFromSessionState)
 	cs.tlsConf = tlsConf
+	cs.allow0RTT = enable0RTT
 
 	// [UQUIC]
-	cs.conn = tls.UQUICClient(quicConf, tls.HelloCustom)
+	cs.conn = tls.UQUICClient(&tls.QUICConfig{
+		TLSConfig:           tlsConf,
+		EnableSessionEvents: true,
+	}, tls.HelloCustom)
 	if err := cs.conn.ApplyPreset(chs); err != nil {
 		panic(err)
 	}
@@ -107,7 +109,7 @@ func newUCryptoSetup(
 	version protocol.Version,
 ) *uCryptoSetup {
 	initialSealer, initialOpener := NewInitialAEAD(connID, perspective, version)
-	if tracer != nil {
+	if tracer != nil && tracer.UpdatedKeyFromTLS != nil {
 		tracer.UpdatedKeyFromTLS(protocol.EncryptionInitial, protocol.PerspectiveClient)
 		tracer.UpdatedKeyFromTLS(protocol.EncryptionInitial, protocol.PerspectiveServer)
 	}
@@ -129,7 +131,7 @@ func (h *uCryptoSetup) ChangeConnectionID(id protocol.ConnectionID) {
 	initialSealer, initialOpener := NewInitialAEAD(id, h.perspective, h.version)
 	h.initialSealer = initialSealer
 	h.initialOpener = initialOpener
-	if h.tracer != nil {
+	if h.tracer != nil && h.tracer.UpdatedKeyFromTLS != nil {
 		h.tracer.UpdatedKeyFromTLS(protocol.EncryptionInitial, protocol.PerspectiveClient)
 		h.tracer.UpdatedKeyFromTLS(protocol.EncryptionInitial, protocol.PerspectiveServer)
 	}
@@ -139,18 +141,17 @@ func (h *uCryptoSetup) SetLargest1RTTAcked(pn protocol.PacketNumber) error {
 	return h.aead.SetLargestAcked(pn)
 }
 
-func (h *uCryptoSetup) StartHandshake() error {
-	err := h.conn.Start(context.WithValue(context.Background(), QUICVersionContextKey, h.version))
+func (h *uCryptoSetup) StartHandshake(ctx context.Context) error {
+	err := h.conn.Start(context.WithValue(ctx, QUICVersionContextKey, h.version))
 	if err != nil {
 		return wrapError(err)
 	}
 	for {
 		ev := h.conn.NextEvent()
-		done, err := h.handleEvent(ev)
-		if err != nil {
+		if err := h.handleEvent(ev); err != nil {
 			return wrapError(err)
 		}
-		if done {
+		if ev.Kind == tls.QUICNoEvent {
 			break
 		}
 	}
@@ -181,48 +182,79 @@ func (h *uCryptoSetup) HandleMessage(data []byte, encLevel protocol.EncryptionLe
 }
 
 func (h *uCryptoSetup) handleMessage(data []byte, encLevel protocol.EncryptionLevel) error {
-	if err := h.conn.HandleData(qtls.ToTLSEncryptionLevel(encLevel), data); err != nil {
+	if err := h.conn.HandleData(encLevel.ToTLSEncryptionLevel(), data); err != nil {
 		return err
 	}
 	for {
 		ev := h.conn.NextEvent()
-		done, err := h.handleEvent(ev)
-		if err != nil {
+		if err := h.handleEvent(ev); err != nil {
 			return err
 		}
-		if done {
+		if ev.Kind == tls.QUICNoEvent {
 			return nil
 		}
 	}
 }
 
-func (h *uCryptoSetup) handleEvent(ev tls.QUICEvent) (done bool, err error) {
+func (h *uCryptoSetup) handleEvent(ev tls.QUICEvent) (err error) {
 	switch ev.Kind {
 	case tls.QUICNoEvent:
-		return true, nil
+		return nil
 	case tls.QUICSetReadSecret:
 		h.setReadKey(ev.Level, ev.Suite, ev.Data)
-		return false, nil
+		return nil
 	case tls.QUICSetWriteSecret:
 		h.setWriteKey(ev.Level, ev.Suite, ev.Data)
-		return false, nil
+		return nil
 	case tls.QUICTransportParameters:
-		return false, h.handleTransportParameters(ev.Data)
+		return h.handleTransportParameters(ev.Data)
 	case tls.QUICTransportParametersRequired:
 		h.conn.SetTransportParameters(h.ourParams.Marshal(h.perspective))
 		// [UQUIC] doesn't expect this and may fail
-		return false, nil
+		return nil
 	case tls.QUICRejectedEarlyData:
 		h.rejected0RTT()
-		return false, nil
+		return nil
 	case tls.QUICWriteData:
 		h.writeRecord(ev.Level, ev.Data)
-		return false, nil
+		return nil
 	case tls.QUICHandshakeDone:
 		h.handshakeComplete()
-		return false, nil
+		return nil
+	case tls.QUICStoreSession:
+		if h.perspective == protocol.PerspectiveServer {
+			panic("cryptoSetup BUG: unexpected QUICStoreSession event for the server")
+		}
+		ev.SessionState.Extra = append(
+			ev.SessionState.Extra,
+			addSessionStateExtraPrefix(h.marshalDataForSessionState(ev.SessionState.EarlyData)),
+		)
+		return h.conn.StoreSession(ev.SessionState)
+	case tls.QUICResumeSession:
+		var allowEarlyData bool
+		switch h.perspective {
+		case protocol.PerspectiveClient:
+			// for clients, this event occurs when a session ticket is selected
+			allowEarlyData = h.handleDataFromSessionState(
+				findSessionStateExtraData(ev.SessionState.Extra),
+				ev.SessionState.EarlyData,
+			)
+		case protocol.PerspectiveServer:
+			// for servers, this event occurs when receiving the client's session ticket
+			allowEarlyData = h.handleSessionTicket(
+				findSessionStateExtraData(ev.SessionState.Extra),
+				ev.SessionState.EarlyData,
+			)
+		}
+		if ev.SessionState.EarlyData {
+			ev.SessionState.EarlyData = allowEarlyData
+		}
+		return nil
 	default:
-		return false, fmt.Errorf("unexpected event: %d", ev.Kind)
+		// Unknown events should be ignored.
+		// crypto/tls will ensure that this is safe to do.
+		// See the discussion following https://github.com/golang/go/issues/68124#issuecomment-2187042510 for details.
+		return nil
 	}
 }
 
@@ -274,12 +306,23 @@ func (h *uCryptoSetup) handleDataFromSessionState(data []byte, earlyData bool) (
 	return false
 }
 
+func (h *uCryptoSetup) getDataForSessionTicket() []byte {
+	ticket := &sessionTicket{
+		RTT: h.rttStats.SmoothedRTT(),
+	}
+	if h.allow0RTT {
+		ticket.Parameters = h.ourParams
+	}
+	return ticket.Marshal()
+}
+
 // GetSessionTicket generates a new session ticket.
 // Due to limitations in crypto/tls, it's only possible to generate a single session ticket per connection.
 // It is only valid for the server.
 func (h *uCryptoSetup) GetSessionTicket() ([]byte, error) {
 	if err := h.conn.SendSessionTicket(tls.QUICSessionTicketOptions{
 		EarlyData: h.allow0RTT,
+		Extra:     [][]byte{addSessionStateExtraPrefix(h.getDataForSessionTicket())},
 	}); err != nil {
 		// Session tickets might be disabled by tls.Config.SessionTicketsDisabled.
 		// We can't check h.tlsConfig here, since the actual config might have been obtained from
@@ -300,6 +343,33 @@ func (h *uCryptoSetup) GetSessionTicket() ([]byte, error) {
 		panic("crypto/tls bug: why more than one ticket?")
 	}
 	return ticket, nil
+}
+
+// handleSessionTicket is called for the server when receiving the client's session ticket.
+// It reads parameters from the session ticket and checks whether to accept 0-RTT if the session ticket enabled 0-RTT.
+// Note that the fact that the session ticket allows 0-RTT doesn't mean that the actual TLS handshake enables 0-RTT:
+// A client may use a 0-RTT enabled session to resume a TLS session without using 0-RTT.
+func (h *uCryptoSetup) handleSessionTicket(data []byte, using0RTT bool) (allowEarlyData bool) {
+	var t sessionTicket
+	if err := t.Unmarshal(data, using0RTT); err != nil {
+		h.logger.Debugf("Unmarshalling session ticket failed: %s", err.Error())
+		return false
+	}
+	h.rttStats.SetInitialRTT(t.RTT)
+	if !using0RTT {
+		return false
+	}
+	valid := h.ourParams.ValidFor0RTT(t.Parameters)
+	if !valid {
+		h.logger.Debugf("Transport parameters changed. Rejecting 0-RTT.")
+		return false
+	}
+	if !h.allow0RTT {
+		h.logger.Debugf("0-RTT not allowed. Rejecting 0-RTT.")
+		return false
+	}
+	h.logger.Debugf("Accepting 0-RTT. Restoring RTT from session ticket: %s", t.RTT)
+	return true
 }
 
 // rejected0RTT is called for the client when the server rejects 0-RTT.
@@ -349,7 +419,7 @@ func (h *uCryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, tr
 	}
 	h.events = append(h.events, Event{Kind: EventReceivedReadKeys})
 	if h.tracer != nil && h.tracer.UpdatedKeyFromTLS != nil {
-		h.tracer.UpdatedKeyFromTLS(qtls.FromTLSEncryptionLevel(el), h.perspective.Opposite())
+		h.tracer.UpdatedKeyFromTLS(protocol.FromTLSEncryptionLevel(el), h.perspective.Opposite())
 	}
 }
 
@@ -400,7 +470,7 @@ func (h *uCryptoSetup) setWriteKey(el tls.QUICEncryptionLevel, suiteID uint16, t
 		panic("unexpected write encryption level")
 	}
 	if h.tracer != nil && h.tracer.UpdatedKeyFromTLS != nil {
-		h.tracer.UpdatedKeyFromTLS(qtls.FromTLSEncryptionLevel(el), h.perspective)
+		h.tracer.UpdatedKeyFromTLS(protocol.FromTLSEncryptionLevel(el), h.perspective)
 	}
 }
 
@@ -511,7 +581,7 @@ func (h *uCryptoSetup) Get1RTTOpener() (ShortHeaderOpener, error) {
 	if h.zeroRTTOpener != nil && time.Since(h.handshakeCompleteTime) > 3*h.rttStats.PTO(true) {
 		h.zeroRTTOpener = nil
 		h.logger.Debugf("Dropping 0-RTT keys.")
-		if h.tracer != nil {
+		if h.tracer != nil && h.tracer.DroppedEncryptionLevel != nil {
 			h.tracer.DroppedEncryptionLevel(protocol.Encryption0RTT)
 		}
 	}
