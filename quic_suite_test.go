@@ -59,19 +59,19 @@ func newUPDConnLocalhost(t testing.TB) *net.UDPConn {
 func areConnsRunning() bool {
 	var b bytes.Buffer
 	pprof.Lookup("goroutine").WriteTo(&b, 1)
-	return strings.Contains(b.String(), "quic-go.(*connection).run")
+	return strings.Contains(b.String(), "uquic.(*connection).run") // [uQUIC]
 }
 
 func areServersRunning() bool {
 	var b bytes.Buffer
 	pprof.Lookup("goroutine").WriteTo(&b, 1)
-	return strings.Contains(b.String(), "quic-go.(*baseServer).run")
+	return strings.Contains(b.String(), "uquic.(*baseServer).run") // [uQUIC]
 }
 
 func areTransportsRunning() bool {
 	var b bytes.Buffer
 	pprof.Lookup("goroutine").WriteTo(&b, 1)
-	return strings.Contains(b.String(), "quic-go.(*Transport).listen")
+	return strings.Contains(b.String(), "uquic.(*Transport).listen") // [uQUIC]
 }
 
 var _ = AfterEach(func() {
