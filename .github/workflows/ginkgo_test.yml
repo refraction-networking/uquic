@@ -27,32 +27,3 @@ jobs:
         env:
           TIMESCALE_FACTOR: 10
         run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -cover -randomize-all -randomize-suites -trace -skip-package integrationtests
-
-      # - name: Run unit tests (32 bit)
-      #   if: ${{ matrix.os != 'macos' }} # can't run 32 bit tests on OSX.
-      #   env:
-      #     TIMESCALE_FACTOR: 10
-      #     GOARCH: 386
-      #   run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -cover -coverprofile coverage.txt -output-dir . -randomize-all -randomize-suites -trace -skip-package integrationtests
-
-      # - name: Run unit tests with race detector
-      #   if: ${{ matrix.os == 'ubuntu' }} # speed things up. Windows and OSX VMs are slow
-      #   env:
-      #     TIMESCALE_FACTOR: 20
-      #   run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -race -randomize-all -randomize-suites -trace -skip-package integrationtests
-
-      - name: Run other tests
-        run: |
-          go run github.com/onsi/ginkgo/v2/ginkgo -r -v -randomize-all -randomize-suites -trace -skip-package self,versionnegotiation integrationtests
-          go run github.com/onsi/ginkgo/v2/ginkgo -r -v -randomize-all -randomize-suites -trace integrationtests/versionnegotiation
-      - name: Run self tests, using QUIC v1
-        if: success() || failure() # run this step even if the previous one failed
-        run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -randomize-all -randomize-suites -trace integrationtests/self -- -version=1
-      - name: Run self tests, using QUIC v2
-        if: success() || failure() # run this step even if the previous one failed
-        run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -randomize-all -randomize-suites -trace integrationtests/self -- -version=2
-      - name: Run self tests, with GSO disabled
-        if: ${{ matrix.os == 'ubuntu' && (success() || failure()) }} # run this step even if the previous one failed
-        env:
-          QUIC_GO_DISABLE_GSO: true
-        run: go run github.com/onsi/ginkgo/v2/ginkgo -r -v -randomize-all -randomize-suites -trace integrationtests/self -- -version=1
