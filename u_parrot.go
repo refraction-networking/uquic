@@ -309,6 +309,7 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 					},
 					&tls.SupportedCurvesExtension{
 						Curves: []tls.CurveID{
+							tls.X25519MLKEM768,
 							tls.CurveX25519,
 							tls.CurveSECP256R1,
 							tls.CurveSECP384R1,
@@ -336,6 +337,9 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 					},
 					&tls.KeyShareExtension{
 						KeyShares: []tls.KeyShare{
+							{
+								Group: tls.X25519MLKEM768,
+							},
 							{
 								Group: tls.X25519,
 							},

@@ -6,6 +6,7 @@ require (
 	github.com/francoispqt/gojay v1.2.13
 	github.com/onsi/ginkgo/v2 v2.23.4
 	github.com/onsi/gomega v1.37.0
+	github.com/pion/dtls/v3 v3.0.6
 	github.com/prometheus/client_golang v1.22.0
 	github.com/quic-go/qpack v0.5.1
 	github.com/refraction-networking/clienthellod v0.5.0-alpha2
