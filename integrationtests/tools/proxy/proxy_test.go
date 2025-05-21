@@ -1,3 +1,7 @@
+//go:build skipfornow
+
+// https://github.com/refraction-networking/uquic/pull/61#issuecomment-2787398442
+
 package quicproxy
 
 import (
