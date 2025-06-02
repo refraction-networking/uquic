@@ -10,7 +10,7 @@ require (
 	github.com/prometheus/client_golang v1.22.0
 	github.com/quic-go/qpack v0.5.1
 	github.com/refraction-networking/clienthellod v0.5.0-alpha2
-	github.com/refraction-networking/utls v1.7.4-0.20250521174854-63aeec73c564
+	github.com/refraction-networking/utls v1.7.4-0.20250523200832-e3fa4364dbc9
 	github.com/stretchr/testify v1.10.0
 	go.uber.org/mock v0.5.2
 	golang.org/x/crypto v0.38.0
