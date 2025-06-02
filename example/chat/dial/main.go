@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -20,7 +22,7 @@ import (
 func main() {
 	var remoteAddr = flag.String("raddr", "127.0.0.1:6666", "remote address")
 	var localAddr = flag.String("laddr", "127.0.0.1:6667", "remote address")
-	// var pubkey = flag.String("secret", "0b63baad7f2f4bb5b547c53adc0fbb179852910607935e6f4b5639fd989b1156", "shared secret")
+	var pubkey = flag.String("pubkey", "0b63baad7f2f4bb5b547c53adc0fbb179852910607935e6f4b5639fd989b1156", "pubkey")
 	// var covert = flag.String("covert", "1.2.3.4:5678", "covert address")
 	flag.Parse()
 
@@ -44,11 +46,22 @@ func main() {
 
 	// quicSpec.ClientHelloSpec = &chSpec
 
-	kyberClient := kyber.NewClient()
-	kyberServer := kyber.NewServer()
+	clientPrivKey := [32]byte{}
+	if _, err := rand.Read(clientPrivKey[:]); err != nil {
+		panic(err)
+	}
+	kyberClient := kyber.Client{Host: kyber.NewHost(clientPrivKey)}
+
+	pub, err := hex.DecodeString(*pubkey)
+	util.Check(err)
+
+	pub32 := [32]byte{}
+	if n := copy(pub32[:], pub); n != 32 {
+		panic("key len != 32")
+	}
 
 	clientData := []byte("hello world")
-	kyberClient.ComputeSharedKey(kyberServer.GetPublicKey())
+	kyberClient.ComputeSharedKey(pub32)
 	x25519kyber768Parrot := kyberClient.GenKyber(clientData)
 
 	tp := quic.UTransport{
@@ -83,7 +96,7 @@ func main() {
 					},
 					&tls.SupportedCurvesExtension{
 						Curves: []tls.CurveID{
-							tls.X25519Kyber768Draft00,
+							tls.X25519MLKEM768,
 							tls.CurveX25519,
 							tls.CurveSECP256R1,
 							tls.CurveSECP384R1,
@@ -112,7 +125,7 @@ func main() {
 					&tls.KeyShareExtension{
 						KeyShares: []tls.KeyShare{
 							{
-								Group: tls.X25519Kyber768Draft00,
+								Group: tls.X25519MLKEM768,
 								Data:  x25519kyber768Parrot,
 							},
 							{

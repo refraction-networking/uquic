@@ -12,6 +12,7 @@ import (
 
 	"github.com/pion/dtls/v3/examples/util"
 	quic "github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic/internal/kyber"
 	"github.com/refraction-networking/uquic/qlog"
 	tls "github.com/refraction-networking/utls"
 )
@@ -43,7 +44,10 @@ func main() {
 	priv, err := hex.DecodeString(station_privkey)
 	util.Check(err)
 
-	fmt.Printf("%v\n", priv)
+	priv32 := [32]byte{}
+	if n := copy(priv32[:], priv); n != 32 {
+		panic("key len != 32")
+	}
 
 	pconn, err := net.ListenUDP("udp", addr)
 	util.Check(err)
@@ -56,10 +60,18 @@ func main() {
 		Tracer: qlog.NewTracer(f),
 	}
 
+	kyberServer := kyber.Server{Host: kyber.NewHost(priv32)}
+	fmt.Printf("kyber server pub key: %x\n", kyberServer.GetPublicKey())
+
 	listener, err := tp.ListenEarly(&tls.Config{
 		Certificates:     []tls.Certificate{certificate},
 		NextProtos:       []string{"h3"},
 		CurvePreferences: []tls.CurveID{tls.X25519},
+		GetOscur0KeyShare: func(key *tls.KeyShare) error {
+			data := kyberServer.DecodeKyber(key.Data)
+			fmt.Printf("Data: %s\n", data)
+			return nil
+		},
 	}, &quic.Config{Tracer: qlog.DefaultConnectionTracer})
 	util.Check(err)
 

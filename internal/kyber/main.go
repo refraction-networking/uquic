@@ -20,11 +20,9 @@ type Host struct {
 }
 
 // NewHost initializes a Host with an X25519 private key
-func NewHost() *Host {
-	host := &Host{}
-	_, err := rand.Read(host.privateKey[:])
-	if err != nil {
-		panic(err)
+func NewHost(privKey [32]byte) *Host {
+	host := &Host{
+		privateKey: privKey,
 	}
 	curve25519.ScalarBaseMult(&host.publicKey, &host.privateKey)
 	return host
@@ -51,11 +49,6 @@ func (h *Host) GetPublicKey() [32]byte {
 
 type Client struct {
 	*Host
-}
-
-// NewClient initializes a Client
-func NewClient() *Client {
-	return &Client{NewHost()}
 }
 
 // GenKyber generates a Kyber-style payload
@@ -104,11 +97,6 @@ func (c *Client) GenKyber(data []byte) []byte {
 
 type Server struct {
 	*Host
-}
-
-// NewServer initializes a Server
-func NewServer() *Server {
-	return &Server{NewHost()}
 }
 
 // DecodeKyber decodes the Kyber-style payload and extracts the original data
@@ -239,8 +227,16 @@ func Decode(a []byte, w int) []int {
 
 func main() {
 	for i := 0; i < 10000; i++ {
-		client := NewClient()
-		server := NewServer()
+		privKey := [32]byte{}
+		if _, err := rand.Read(privKey[:]); err != nil {
+			panic(err)
+		}
+		clientPrivKey := [32]byte{}
+		if _, err := rand.Read(clientPrivKey[:]); err != nil {
+			panic(err)
+		}
+		server := &Server{Host: NewHost(privKey)}
+		client := &Client{Host: NewHost(clientPrivKey)}
 
 		clientData := []byte("hello world")
 		client.ComputeSharedKey(server.GetPublicKey())
