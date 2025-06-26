@@ -68,7 +68,10 @@ func main() {
 		NextProtos:       []string{"h3"},
 		CurvePreferences: []tls.CurveID{tls.X25519},
 		GetOscur0KeyShare: func(key *tls.KeyShare) error {
-			data := kyberServer.DecodeKyber(key.Data)
+			data, err := kyberServer.DecodeKyber(key.Data)
+			if err != nil {
+				return fmt.Errorf("error decrypting data from pq keyshare: %v", err)
+			}
 			fmt.Printf("Data: %s\n", data)
 			return nil
 		},

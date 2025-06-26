@@ -29,17 +29,17 @@ func NewHost(privKey [32]byte) *Host {
 }
 
 // ComputeSharedKey computes the shared secret using the other party's public key
-func (h *Host) ComputeSharedKey(peerPublicKey [32]byte) []byte {
+func (h *Host) ComputeSharedKey(peerPublicKey [32]byte) ([]byte, error) {
 	sharedKey := [32]byte{}
 	curve25519.ScalarMult(&sharedKey, &h.privateKey, &peerPublicKey)
 
 	hkdf := hkdf.New(sha256.New, sharedKey[:], nil, []byte("handshake data"))
 	derivedKey := make([]byte, 32)
 	if _, err := hkdf.Read(derivedKey); err != nil {
-		panic(err)
+		return nil, err
 	}
 	h.derivedKey = derivedKey
-	return derivedKey
+	return derivedKey, nil
 }
 
 // GetPublicKey returns the public key of the Host
@@ -100,11 +100,13 @@ type Server struct {
 }
 
 // DecodeKyber decodes the Kyber-style payload and extracts the original data
-func (s *Server) DecodeKyber(parrot []byte) []byte {
+func (s *Server) DecodeKyber(parrot []byte) ([]byte, error) {
 	var clientPublicKey [32]byte
 	copy(clientPublicKey[:], parrot[:32])
 
-	s.ComputeSharedKey(clientPublicKey)
+	if _, err := s.ComputeSharedKey(clientPublicKey); err != nil {
+		return nil, err
+	}
 
 	encodedCiphertext := parrot[32:1184]
 	nonce := parrot[1184:1196]
@@ -113,22 +115,22 @@ func (s *Server) DecodeKyber(parrot []byte) []byte {
 	ciphertext := decodeBase3329ToBytes(Decode(encodedCiphertext, 12))
 	aesBlock, err := aes.NewCipher(s.derivedKey)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	gcm, err := cipher.NewGCMWithNonceSize(aesBlock, 12)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	gcmCiphertext := append(ciphertext, tag...)
 	decryptedData, err := gcm.Open(nil, nonce, gcmCiphertext, nil)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	length := int(binary.BigEndian.Uint16(decryptedData[1121:1123]))
-	return decryptedData[:1121-length]
+	return decryptedData[:1121-length], nil
 }
 
 // Helper functions for encoding and decoding base 3329
@@ -242,7 +244,10 @@ func main() {
 		client.ComputeSharedKey(server.GetPublicKey())
 		x25519kyber768Parrot := client.GenKyber(clientData)
 
-		serverData := server.DecodeKyber(x25519kyber768Parrot)
+		serverData, err := server.DecodeKyber(x25519kyber768Parrot)
+		if err != nil {
+			panic(err)
+		}
 		if string(clientData) != string(serverData) {
 			panic("Data mismatch")
 		}
