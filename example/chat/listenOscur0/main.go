@@ -11,6 +11,7 @@ import (
 
 	"github.com/pion/dtls/v3/examples/util"
 	quic "github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic/example/chat"
 )
 
 const (
@@ -28,6 +29,7 @@ type streamConn struct {
 func main() {
 	var listenAddr = flag.String("laddr", "0.0.0.0:6666", "listen address")
 	var remoteAddr = flag.String("raddr", "127.0.0.1:6667", "listen address")
+	var keyStr = flag.String("key", "dc079246c2a46f42245546e02bf91ed7d0f3bca91e8b248445f9c39752b011e1", "key")
 
 	flag.Parse()
 
@@ -49,20 +51,20 @@ func main() {
 	// Simulate a chat session
 	hub := util.NewHub()
 
-	readKey, err := hex.DecodeString("dc079246c2a46f42245546e02bf91ed7d0f3bca91e8b248445f9c39752b011e1")
+	key, err := hex.DecodeString(*keyStr)
 	util.Check(err)
 
-	writeKey, err := hex.DecodeString("df58c54c3924b0d078377cfe41af7f116dca94e69e3bee6eb28460831bd92dca")
+	state, err := chat.QuicState(key)
 	util.Check(err)
 
 	go func() {
 		// 	for {
 		// 		// Wait for a connection.
 		econn, err := quic.Oscur0Server(pconn, raddr, &quic.Oscur0Config{
-			ReadKey:      readKey,
-			WriteKey:     writeKey,
-			ClientConnID: []uint8{1, 2, 3, 5, 7},
-			ServerConnID: []uint8{5, 6, 7, 9, 10},
+			ReadKey:      state.ReadKey,
+			WriteKey:     state.WriteKey,
+			ClientConnID: state.ClientConnID,
+			ServerConnID: state.ServerConnID,
 		})
 		util.Check(err)
 
