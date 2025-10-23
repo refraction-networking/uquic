@@ -37,7 +37,7 @@ func Oscur0Client(pconn net.PacketConn, addr net.Addr, oscur0Conf *Oscur0Config)
 	return econn, nil
 }
 
-func Oscur0Server(pconn net.PacketConn, addr net.Addr, oscur0Conf *Oscur0Config) (Connection, error) {
+func Oscur0Server(ctx context.Context, pconn net.PacketConn, addr net.Addr, oscur0Conf *Oscur0Config) (Connection, error) {
 	keyLogWriter, err := os.Create("./server_keylog.txt")
 	if err != nil {
 		return nil, err
@@ -48,7 +48,7 @@ func Oscur0Server(pconn net.PacketConn, addr net.Addr, oscur0Conf *Oscur0Config)
 		ConnectionIDLength: len(oscur0Conf.ClientConnID),
 	}
 
-	return tp.Oscur0Accept(addr, &tls.Config{
+	return tp.Oscur0Accept(ctx, addr, &tls.Config{
 		NextProtos:   []string{"h3"},
 		KeyLogWriter: keyLogWriter,
 	}, &Config{}, oscur0Conf)
