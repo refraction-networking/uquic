@@ -582,7 +582,7 @@ func (s *connection) runOscur0() error {
 // 	return l.baseServer.Oscur0Accept(&net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 6667}, srcCID, dstCID)
 // }
 
-func (tp *Transport) Oscur0Accept(remoteAddr net.Addr, tlsConf *tls.Config, quicConf *Config, oscur0Conf *Oscur0Config) (quicConn, error) {
+func (tp *Transport) Oscur0Accept(ctx context.Context, remoteAddr net.Addr, tlsConf *tls.Config, quicConf *Config, oscur0Conf *Oscur0Config) (quicConn, error) {
 	SrcConnectionID := ConnectionIDFromBytes(oscur0Conf.ClientConnID)
 	DestConnectionID := ConnectionIDFromBytes(oscur0Conf.ServerConnID)
 
@@ -664,7 +664,7 @@ func (tp *Transport) Oscur0Accept(remoteAddr net.Addr, tlsConf *tls.Config, quic
 		// if origDestConnID.Len() > 0 {
 		// 	connID = origDestConnID
 		// }
-		tracer = quicConf.Tracer(context.WithValue(context.Background(), ConnectionTracingKey, tracingID), protocol.PerspectiveServer, SrcConnectionID)
+		tracer = quicConf.Tracer(context.WithValue(ctx, ConnectionTracingKey, tracingID), protocol.PerspectiveServer, SrcConnectionID)
 	}
 	logger := utils.DefaultLogger.WithPrefix("server")
 	if err := validateConfig(quicConf); err != nil {
@@ -684,9 +684,9 @@ func (tp *Transport) Oscur0Accept(remoteAddr net.Addr, tlsConf *tls.Config, quic
 	tlsConf.MinVersion = tls.VersionTLS13
 	// setTLSConfigServerName(tlsConf, addr, host)
 
-	ctx, cancel := context.WithCancelCause(context.Background())
+	ctx2, cancel := context.WithCancelCause(ctx)
 	conn = newConnection(
-		ctx,
+		ctx2,
 		cancel,
 		newSendConn(tp.conn, remoteAddr, packetInfo{}, logger),
 		tp.handlerMap,
