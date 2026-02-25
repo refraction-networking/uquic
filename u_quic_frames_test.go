@@ -171,3 +171,77 @@ var (
 		Length:     512,
 	}
 )
+
+// Verifies that Build does not panic when called with empty cryptoData.
+// This reproduces a scenario where a QUIC probe packet retransmits with
+// no actual crypto payload, causing uint64 underflow in the CRYPTO
+// frame length calculation.
+func TestQUICRandomFramesEmptyCryptoData(t *testing.T) {
+	qrf := &QUICRandomFrames{
+		MinPING:    0,
+		MaxPING:    3,
+		MinCRYPTO:  2, // Must be >=2 to enter the splitting loop
+		MaxCRYPTO:  4,
+		MinPADDING: 1,
+		MaxPADDING: 3,
+		Length:     100,
+	}
+
+	payload, err := qrf.Build([]byte{})
+	if err != nil {
+		t.Fatalf("Build with empty cryptoData returned error: %v", err)
+	}
+	if payload == nil {
+		t.Fatal("Build with empty cryptoData returned nil payload")
+	}
+}
+
+// Verifies Build handles the edge case where cryptoData is too small
+// to split across multiple CRYPTO frames without underflow.
+func TestQUICRandomFramesSingleByteCryptoData(t *testing.T) {
+	qrf := &QUICRandomFrames{
+		MinPING:    0,
+		MaxPING:    2,
+		MinCRYPTO:  3, // Requesting 3+ splits of 1 byte
+		MaxCRYPTO:  5,
+		MinPADDING: 1,
+		MaxPADDING: 2,
+		Length:     50,
+	}
+
+	payload, err := qrf.Build([]byte{0x42})
+	if err != nil {
+		t.Fatalf("Build with single-byte cryptoData returned error: %v", err)
+	}
+	if payload == nil {
+		t.Fatal("Build with single-byte cryptoData returned nil payload")
+	}
+}
+
+func TestQUICFramesEmptyCryptoData(t *testing.T) {
+	frames := QUICFrames{
+		QUICFrameCrypto{Offset: 0, Length: 0},
+	}
+
+	payload, err := frames.Build([]byte{})
+	if err != nil {
+		t.Fatalf("Build with empty cryptoData returned error: %v", err)
+	}
+	if payload == nil {
+		t.Fatal("Build returned nil payload")
+	}
+}
+
+func TestQUICFramesOffsetExceedsCryptoData(t *testing.T) {
+	frames := QUICFrames{
+		QUICFrameCrypto{Offset: 100, Length: 0}, // offset far beyond data
+	}
+
+	payload, err := frames.Build([]byte{0x01, 0x02, 0x03})
+	if err != nil {
+		t.Fatalf("Build with excessive offset returned error: %v", err)
+	}
+	if payload == nil {
+		t.Fatal("Build returned nil payload")
+	}
+}

@@ -46,6 +46,12 @@ func (qfs QUICFrames) Build(cryptoData []byte) (payload []byte, err error) {
 				// calculate length: from offset to the end of cryptoData
 				length = len(cryptoData) - lengthOffset
 			}
+			// Guard against empty or insufficient cryptoData (e.g. probe packets
+			// that retransmit with no actual crypto payload).
+			if length <= 0 || lengthOffset >= len(cryptoData) {
+				length = 0
+				lengthOffset = 0
+			}
 			frameBytes = []byte{0x06} // CRYPTO frame type
 			frameBytes = quicvarint.Append(frameBytes, uint64(offset))
 			frameBytes = quicvarint.Append(frameBytes, uint64(length))
@@ -219,7 +225,16 @@ func (qrf *QUICRandomFrames) Build(cryptoData []byte) (payload []byte, err error
 	var frameList QUICFrames = make([]QUICFrame, 0)
 
 	var cryptoSafeRandUint64 = func(min, max uint64) (uint64, error) {
-		minMaxDiff := big.NewInt(int64(max - min))
+		if min >= max {
+			return min, nil
+		}
+		diff := max - min
+		// Guard against uint64 underflow at call sites: if the difference
+		// exceeds int64 range, the max was computed via underflowing subtraction.
+		if diff > uint64(math.MaxInt64) {
+			return min, nil
+		}
+		minMaxDiff := big.NewInt(int64(diff))
 		offset, err := rand.Int(rand.Reader, minMaxDiff)
 		if err != nil {
 			return 0, err
