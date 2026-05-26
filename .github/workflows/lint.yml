@@ -1,0 +1,86 @@
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOEXPERIMENT: ${{ matrix.go == '1.24.x' && 'synctest' || '' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.x"
+      - name: Check for //go:build ignore in .go files
+        run: |
+          IGNORED_FILES=$(grep -rl '//go:build ignore' . --include='*.go') || true
+          if [ -n "$IGNORED_FILES" ]; then
+            echo "::error::Found ignored Go files: $IGNORED_FILES"
+            exit 1
+          fi
+      - name: Check that go.mod is tidied
+        if: success() || failure() # run this step even if the previous one failed
+        run: go mod tidy -diff
+      - name: Run code generators
+        if: success() || failure() # run this step even if the previous one failed
+        run: .github/workflows/go-generate.sh
+      - name: Check that go mod vendor works
+        if: success() || failure() # run this step even if the previous one failed
+        run: |
+          cd integrationtests/gomodvendor
+          go mod vendor
+      - name: run gcassert
+        if: success() || failure() # run this step even if the previous one failed
+        run: go tool gcassert ./...
+  golangci-lint:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: [ "1.24.x", "1.25.x" ]
+    env:
+      GOLANGCI_LINT_VERSION: v2.6.0
+      GOEXPERIMENT: ${{ matrix.go == '1.24.x' && 'synctest' || '' }}
+    name: golangci-lint (Go ${{ matrix.go }})
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+      - name: golangci-lint (Linux)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          args: --timeout=3m
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+      - name: golangci-lint (Windows)
+        if: success() || failure() # run this step even if the previous one failed
+        uses: golangci/golangci-lint-action@v9
+        env:
+          GOOS: "windows"
+        with:
+          args: --timeout=3m
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+      - name: golangci-lint (OSX)
+        if: success() || failure() # run this step even if the previous one failed
+        uses: golangci/golangci-lint-action@v9
+        env:
+          GOOS: "darwin"
+        with:
+          args: --timeout=3m
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+      - name: golangci-lint (FreeBSD)
+        if: success() || failure() # run this step even if the previous one failed
+        uses: golangci/golangci-lint-action@v9
+        env:
+          GOOS: "freebsd"
+        with:
+          args: --timeout=3m
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+      - name: golangci-lint (others)
+        if: success() || failure() # run this step even if the previous one failed
+        uses: golangci/golangci-lint-action@v9
+        env:
+          GOOS: "solaris" # some OS that we don't have any build tags for
+        with:
+          args: --timeout=3m
+          version: ${{ env.GOLANGCI_LINT_VERSION }}

@@ -3,23 +3,29 @@ package quic
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
+	"math"
 	"net"
+	"runtime"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
-	tls "github.com/refraction-networking/utls"
-
-	mocklogging "github.com/refraction-networking/uquic/internal/mocks/logging"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/qerr"
+	"github.com/refraction-networking/uquic/internal/synctest"
 	"github.com/refraction-networking/uquic/internal/utils"
 	"github.com/refraction-networking/uquic/internal/wire"
-	"github.com/refraction-networking/uquic/logging"
+	"github.com/refraction-networking/uquic/qlog"
+	"github.com/refraction-networking/uquic/qlogwriter"
+	"github.com/refraction-networking/uquic/testutils/events"
+	"github.com/refraction-networking/uquic/testutils/simnet"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 )
 
 type mockPacketConn struct {
@@ -47,54 +53,48 @@ type mockPacketHandler struct {
 	destruction chan<- error
 }
 
-func (h *mockPacketHandler) handlePacket(p receivedPacket)                        { h.packets <- p }
-func (h *mockPacketHandler) destroy(err error)                                    { h.destruction <- err }
-func (h *mockPacketHandler) closeWithTransportError(code qerr.TransportErrorCode) {}
-
-func getPacket(t *testing.T, connID protocol.ConnectionID) []byte {
-	return getPacketWithPacketType(t, connID, protocol.PacketTypeHandshake, 2)
+func (h *mockPacketHandler) handlePacket(p receivedPacket) {
+	h.packets <- p
 }
 
-func getPacketWithPacketType(t *testing.T, connID protocol.ConnectionID, typ protocol.PacketType, length protocol.ByteCount) []byte {
+func (h *mockPacketHandler) destroy(err error) {
+	if h.destruction != nil {
+		h.destruction <- err
+	}
+}
+
+func (h *mockPacketHandler) closeWithTransportError(code qerr.TransportErrorCode) {}
+
+func newSimnetLink(t *testing.T, rtt time.Duration) (client, server net.PacketConn, close func()) {
 	t.Helper()
-	b, err := (&wire.ExtendedHeader{
-		Header: wire.Header{
-			Type:             typ,
-			DestConnectionID: connID,
-			Length:           length,
-			Version:          protocol.Version1,
-		},
-		PacketNumberLen: protocol.PacketNumberLen2,
-	}).Append(nil, protocol.Version1)
-	require.NoError(t, err)
-	return append(b, bytes.Repeat([]byte{42}, int(length)-2)...)
+
+	n := &simnet.Simnet{Router: &simnet.PerfectRouter{}}
+	settings := simnet.NodeBiDiLinkSettings{Latency: rtt / 2}
+
+	client = n.NewEndpoint(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9001}, settings)
+	server = n.NewEndpoint(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9002}, settings)
+	require.NoError(t, n.Start())
+	return client, server, func() {
+		require.NoError(t, n.Close())
+	}
 }
 
 func TestTransportPacketHandling(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	phm := NewMockPacketHandlerManager(mockCtrl)
-
-	tr := &Transport{
-		Conn:       newUPDConnLocalhost(t),
-		handlerMap: phm,
-	}
+	tr := &Transport{Conn: newUDPConnLocalhost(t)}
 	tr.init(true)
-	defer func() {
-		phm.EXPECT().Close(gomock.Any())
-		tr.Close()
-	}()
+	defer tr.Close()
 
 	connID1 := protocol.ParseConnectionID([]byte{1, 2, 3, 4, 5, 6, 7, 8})
 	connID2 := protocol.ParseConnectionID([]byte{8, 7, 6, 5, 4, 3, 2, 1})
 
 	connChan1 := make(chan receivedPacket, 1)
 	conn1 := &mockPacketHandler{packets: connChan1}
-	phm.EXPECT().Get(connID1).Return(conn1, true)
+	(*packetHandlerMap)(tr).Add(connID1, conn1)
 	connChan2 := make(chan receivedPacket, 1)
 	conn2 := &mockPacketHandler{packets: connChan2}
-	phm.EXPECT().Get(connID2).Return(conn2, true)
+	(*packetHandlerMap)(tr).Add(connID2, conn2)
 
-	conn := newUPDConnLocalhost(t)
+	conn := newUDPConnLocalhost(t)
 	_, err := conn.WriteTo(getPacket(t, connID1), tr.Conn.LocalAddr())
 	require.NoError(t, err)
 	_, err = conn.WriteTo(getPacket(t, connID2), tr.Conn.LocalAddr())
@@ -121,7 +121,7 @@ func TestTransportPacketHandling(t *testing.T) {
 }
 
 func TestTransportAndListenerConcurrentClose(t *testing.T) {
-	tr := &Transport{Conn: newUPDConnLocalhost(t)}
+	tr := &Transport{Conn: newUDPConnLocalhost(t)}
 	ln, err := tr.Listen(&tls.Config{}, nil)
 	require.NoError(t, err)
 	// close transport and listener concurrently
@@ -137,9 +137,9 @@ func TestTransportAndListenerConcurrentClose(t *testing.T) {
 }
 
 func TestTransportAndDialConcurrentClose(t *testing.T) {
-	server := newUPDConnLocalhost(t)
+	server := newUDPConnLocalhost(t)
 
-	tr := &Transport{Conn: newUPDConnLocalhost(t)}
+	tr := &Transport{Conn: newUDPConnLocalhost(t)}
 	// close transport and dial concurrently
 	errChan := make(chan error, 1)
 	go func() { errChan <- tr.Close() }()
@@ -158,51 +158,53 @@ func TestTransportAndDialConcurrentClose(t *testing.T) {
 }
 
 func TestTransportErrFromConn(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	phm := NewMockPacketHandlerManager(mockCtrl)
-	readErrChan := make(chan error, 2)
-	conn := &mockPacketConn{readErrs: readErrChan, localAddr: &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1234}}
-	tr := Transport{Conn: conn, handlerMap: phm}
-	defer tr.Close()
+	t.Setenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING", "true")
 
-	tr.init(true)
-	tr.handlerMap = phm
+	synctest.Test(t, func(t *testing.T) {
+		readErrChan := make(chan error, 2)
+		tr := Transport{
+			Conn: &mockPacketConn{
+				readErrs:  readErrChan,
+				localAddr: &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1234},
+			},
+		}
+		defer tr.Close()
+		tr.init(true)
 
-	// temporary errors don't lead to a shutdown...
-	var tempErr deadlineError
-	require.True(t, tempErr.Temporary())
-	readErrChan <- tempErr
-	// don't expect any calls to phm.Close
-	time.Sleep(scaleDuration(20 * time.Millisecond))
+		errChan := make(chan error, 1)
+		ph := &mockPacketHandler{destruction: errChan}
+		(*packetHandlerMap)(&tr).Add(protocol.ParseConnectionID([]byte{1, 2, 3, 4}), ph)
 
-	// ...but non-temporary errors do
-	done := make(chan struct{})
-	phm.EXPECT().Close(gomock.Any()).Do(func(error) { close(done) })
-	readErrChan <- errors.New("read failed")
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("timeout")
-	}
+		// temporary errors don't lead to a shutdown...
+		var tempErr deadlineError
+		require.True(t, tempErr.Temporary())
+		readErrChan <- tempErr
+		// don't expect any calls to phm.Close
+		synctest.Wait()
 
-	_, err := tr.Listen(&tls.Config{}, nil)
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrTransportClosed)
+		// ...but non-temporary errors do
+		readErrChan <- errors.New("read failed")
+		synctest.Wait()
+
+		select {
+		case err := <-errChan:
+			require.ErrorIs(t, err, ErrTransportClosed)
+		case <-time.After(time.Second):
+			t.Fatal("timeout")
+		}
+
+		_, err := tr.Listen(&tls.Config{}, nil)
+		require.ErrorIs(t, err, ErrTransportClosed)
+	})
 }
 
 func TestTransportStatelessResetReceiving(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	phm := NewMockPacketHandlerManager(mockCtrl)
 	tr := &Transport{
-		Conn:               newUPDConnLocalhost(t),
+		Conn:               newUDPConnLocalhost(t),
 		ConnectionIDLength: 4,
-		handlerMap:         phm,
 	}
 	tr.init(true)
-	defer func() {
-		phm.EXPECT().Close(gomock.Any())
-		tr.Close()
-	}()
+	defer tr.Close()
 
 	connID := protocol.ParseConnectionID([]byte{9, 10, 11, 12})
 	// now send a packet with a connection ID that doesn't exist
@@ -213,230 +215,233 @@ func TestTransportStatelessResetReceiving(t *testing.T) {
 
 	destroyChan := make(chan error, 1)
 	conn1 := &mockPacketHandler{destruction: destroyChan}
-	gomock.InOrder(
-		phm.EXPECT().Get(connID), // no handler for this connection ID
-		phm.EXPECT().GetByResetToken(token).Return(conn1, true),
-	)
+	(*packetHandlerMap)(tr).AddResetToken(token, conn1)
 
-	conn := newUPDConnLocalhost(t)
+	conn := newUDPConnLocalhost(t)
 	_, err = conn.WriteTo(b, tr.Conn.LocalAddr())
 	require.NoError(t, err)
 
 	select {
 	case err := <-destroyChan:
-		require.Error(t, err)
+		require.ErrorIs(t, err, &qerr.StatelessResetError{})
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}
 }
 
 func TestTransportStatelessResetSending(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	phm := NewMockPacketHandlerManager(mockCtrl)
-	tracer, mockTracer := mocklogging.NewMockTracer(mockCtrl)
-	tr := &Transport{
-		Conn:               newUPDConnLocalhost(t),
-		ConnectionIDLength: 4,
-		StatelessResetKey:  &StatelessResetKey{1, 2, 3, 4},
-		handlerMap:         phm,
-		Tracer:             tracer,
-	}
-	tr.init(true)
-	defer func() {
-		mockTracer.EXPECT().Close()
-		phm.EXPECT().Close(gomock.Any())
-		tr.Close()
-	}()
+	synctest.Test(t, func(t *testing.T) {
+		const rtt = 10 * time.Millisecond
+		clientConn, serverConn, closeFn := newSimnetLink(t, rtt)
+		defer closeFn()
 
-	connID := protocol.ParseConnectionID([]byte{9, 10, 11, 12})
-	phm.EXPECT().Get(connID) // no handler for this connection ID
-	phm.EXPECT().GetByResetToken(gomock.Any())
+		var eventRecorder events.Recorder
+		tr := &Transport{
+			Conn:               serverConn,
+			ConnectionIDLength: 4,
+			StatelessResetKey:  &StatelessResetKey{1, 2, 3, 4},
+			Tracer:             &eventRecorder,
+		}
+		tr.init(true)
+		defer tr.Close()
 
-	// now send a packet with a connection ID that doesn't exist
-	b, err := wire.AppendShortHeader(nil, connID, 1337, 2, protocol.KeyPhaseOne)
-	require.NoError(t, err)
+		connID := protocol.ParseConnectionID([]byte{9, 10, 11, 12})
 
-	conn := newUPDConnLocalhost(t)
+		// now send a packet with a connection ID that doesn't exist
+		b, err := wire.AppendShortHeader(nil, connID, 1337, 2, protocol.KeyPhaseOne)
+		require.NoError(t, err)
 
-	// no stateless reset sent for packets smaller than MinStatelessResetSize
-	dropped := make(chan struct{})
-	smallPacket := append(b, make([]byte, protocol.MinStatelessResetSize-len(b))...)
-	mockTracer.EXPECT().DroppedPacket(conn.LocalAddr(), logging.PacketTypeNotDetermined, protocol.ByteCount(len(smallPacket)), logging.PacketDropUnknownConnectionID).Do(
-		func(net.Addr, logging.PacketType, protocol.ByteCount, logging.PacketDropReason) { close(dropped) },
-	)
-	_, err = conn.WriteTo(smallPacket, tr.Conn.LocalAddr())
-	require.NoError(t, err)
-	select {
-	case <-dropped:
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for packet to be dropped")
-	}
-	require.True(t, mockCtrl.Satisfied())
+		// no stateless reset sent for packets smaller than MinStatelessResetSize
+		smallPacket := append(b, make([]byte, protocol.MinStatelessResetSize-len(b))...)
+		_, err = clientConn.WriteTo(smallPacket, tr.Conn.LocalAddr())
+		require.NoError(t, err)
 
-	// but a stateless reset is sent for packets larger than MinStatelessResetSize
-	phm.EXPECT().Get(connID) // no handler for this connection ID
-	phm.EXPECT().GetByResetToken(gomock.Any())
-	_, err = conn.WriteTo(append(b, make([]byte, protocol.MinStatelessResetSize-len(b)+1)...), tr.Conn.LocalAddr())
-	require.NoError(t, err)
-	conn.SetReadDeadline(time.Now().Add(time.Second))
-	p := make([]byte, 1024)
-	n, addr, err := conn.ReadFrom(p)
-	require.NoError(t, err)
-	require.Equal(t, addr, tr.Conn.LocalAddr())
-	srt := newStatelessResetter(tr.StatelessResetKey).GetStatelessResetToken(connID)
-	require.Contains(t, string(p[:n]), string(srt[:]))
+		time.Sleep(rtt) // so that the packet arrives at the server
+
+		require.Equal(t,
+			[]qlogwriter.Event{
+				qlog.PacketDropped{
+					Header:  qlog.PacketHeader{PacketType: qlog.PacketType1RTT},
+					Raw:     qlog.RawInfo{Length: len(smallPacket)},
+					Trigger: qlog.PacketDropUnknownConnectionID,
+				},
+			},
+			eventRecorder.Events(qlog.PacketDropped{}),
+		)
+
+		// but a stateless reset is sent for packets larger than MinStatelessResetSize
+		_, err = clientConn.WriteTo(append(b, make([]byte, protocol.MinStatelessResetSize-len(b)+1)...), tr.Conn.LocalAddr())
+		require.NoError(t, err)
+		clientConn.SetReadDeadline(time.Now().Add(time.Second))
+		p := make([]byte, 1024)
+		n, addr, err := clientConn.ReadFrom(p)
+		require.NoError(t, err)
+		require.Equal(t, addr, tr.Conn.LocalAddr())
+		srt := newStatelessResetter(tr.StatelessResetKey).GetStatelessResetToken(connID)
+		require.Contains(t, string(p[:n]), string(srt[:]))
+	})
 }
 
-func TestTransportDropsUnparseableQUICPackets(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	tracer, mockTracer := mocklogging.NewMockTracer(mockCtrl)
-	tr := &Transport{
-		Conn:               newUPDConnLocalhost(t),
-		ConnectionIDLength: 10,
-		Tracer:             tracer,
-	}
-	require.NoError(t, tr.init(true))
-	defer func() {
-		mockTracer.EXPECT().Close()
-		tr.Close()
-	}()
+func TestTransportUnparseableQUICPackets(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const rtt = 10 * time.Millisecond
+		clientConn, serverConn, closeFn := newSimnetLink(t, rtt)
+		defer closeFn()
 
-	conn := newUPDConnLocalhost(t)
+		var eventRecorder events.Recorder
+		tr := &Transport{
+			Conn:               serverConn,
+			ConnectionIDLength: 10,
+			Tracer:             &eventRecorder,
+		}
+		require.NoError(t, tr.init(true))
+		defer tr.Close()
 
-	dropped := make(chan struct{})
-	mockTracer.EXPECT().DroppedPacket(conn.LocalAddr(), logging.PacketTypeNotDetermined, protocol.ByteCount(4), logging.PacketDropHeaderParseError).Do(
-		func(net.Addr, logging.PacketType, protocol.ByteCount, logging.PacketDropReason) { close(dropped) },
-	)
-	_, err := conn.WriteTo([]byte{0x40 /* set the QUIC bit */, 1, 2, 3}, tr.Conn.LocalAddr())
-	require.NoError(t, err)
-	select {
-	case <-dropped:
-	case <-time.After(time.Second):
-		t.Fatal("timeout waiting for packet to be dropped")
-	}
+		_, err := clientConn.WriteTo([]byte{0x40 /* set the QUIC bit */, 1, 2, 3}, tr.Conn.LocalAddr())
+		require.NoError(t, err)
+
+		time.Sleep(rtt) // so that the packet arrives at the server
+
+		require.Equal(t,
+			[]qlogwriter.Event{
+				qlog.PacketDropped{
+					Raw:     qlog.RawInfo{Length: 4},
+					Trigger: qlog.PacketDropHeaderParseError,
+				},
+			},
+			eventRecorder.Events(qlog.PacketDropped{}),
+		)
+	})
 }
 
 func TestTransportListening(t *testing.T) {
-	tracer, mockTracer := mocklogging.NewMockTracer(gomock.NewController(t))
-	tr := &Transport{
-		Conn:               newUPDConnLocalhost(t),
-		ConnectionIDLength: 5,
-		Tracer:             tracer,
-	}
-	require.NoError(t, tr.init(true))
-	defer func() {
-		mockTracer.EXPECT().Close()
-		tr.Close()
-	}()
+	synctest.Test(t, func(t *testing.T) {
+		const rtt = 10 * time.Millisecond
+		clientConn, serverConn, closeFn := newSimnetLink(t, rtt)
+		defer closeFn()
 
-	conn := newUPDConnLocalhost(t)
-	data := wire.ComposeVersionNegotiation([]byte{1, 2, 3, 4, 5}, []byte{6, 7, 8, 9, 10}, []protocol.Version{protocol.Version1})
-	dropped := make(chan struct{}, 10)
-	mockTracer.EXPECT().DroppedPacket(conn.LocalAddr(), logging.PacketTypeNotDetermined, protocol.ByteCount(len(data)), logging.PacketDropUnknownConnectionID).Do(
-		func(net.Addr, logging.PacketType, protocol.ByteCount, logging.PacketDropReason) {
-			dropped <- struct{}{}
-		},
-	)
+		var eventRecorder events.Recorder
+		tr := &Transport{
+			Conn:               serverConn,
+			ConnectionIDLength: 5,
+			Tracer:             &eventRecorder,
+		}
+		require.NoError(t, tr.init(true))
+		defer tr.Close()
 
-	_, err := conn.WriteTo(data, tr.Conn.LocalAddr())
-	require.NoError(t, err)
-	select {
-	case <-dropped:
-	case <-time.After(time.Second):
-		t.Fatal("timeout")
-	}
+		data := wire.ComposeVersionNegotiation([]byte{1, 2, 3, 4, 5}, []byte{6, 7, 8, 9, 10}, []protocol.Version{protocol.Version1})
 
-	ln, err := tr.Listen(&tls.Config{}, nil)
-	require.NoError(t, err)
+		_, err := clientConn.WriteTo(data, tr.Conn.LocalAddr())
+		require.NoError(t, err)
 
-	// send the packet again
-	lnDropped := make(chan struct{}, 10)
-	mockTracer.EXPECT().DroppedPacket(conn.LocalAddr(), logging.PacketTypeVersionNegotiation, protocol.ByteCount(len(data)), logging.PacketDropUnexpectedPacket).Do(
-		func(net.Addr, logging.PacketType, protocol.ByteCount, logging.PacketDropReason) {
-			lnDropped <- struct{}{}
-		},
-	)
+		time.Sleep(rtt) // so that the packet arrives at the server
 
-	_, err = conn.WriteTo(data, tr.Conn.LocalAddr())
-	require.NoError(t, err)
-	select {
-	case <-lnDropped:
-	case <-dropped:
-		t.Fatal("packet should have been handled by the listener")
-	case <-time.After(time.Second):
-		t.Fatal("timeout")
-	}
+		require.Equal(t,
+			[]qlogwriter.Event{
+				qlog.PacketDropped{
+					Raw:     qlog.RawInfo{Length: len(data)},
+					Trigger: qlog.PacketDropUnknownConnectionID,
+				},
+			},
+			eventRecorder.Events(qlog.PacketDropped{}),
+		)
+		eventRecorder.Clear()
 
-	// only a single listener can be set
-	_, err = tr.Listen(&tls.Config{}, nil)
-	require.Error(t, err)
-	require.ErrorIs(t, err, errListenerAlreadySet)
+		ln, err := tr.Listen(&tls.Config{}, nil)
+		require.NoError(t, err)
 
-	require.NoError(t, ln.Close())
-	// now it's possible to add a new listener
-	ln, err = tr.Listen(&tls.Config{}, nil)
-	require.NoError(t, err)
-	defer ln.Close()
+		_, err = clientConn.WriteTo(data, tr.Conn.LocalAddr())
+		require.NoError(t, err)
+		time.Sleep(rtt) // so that the packet arrives at the server
+
+		require.Equal(t,
+			[]qlogwriter.Event{
+				qlog.PacketDropped{
+					Header:  qlog.PacketHeader{PacketType: qlog.PacketTypeVersionNegotiation},
+					Raw:     qlog.RawInfo{Length: len(data)},
+					Trigger: qlog.PacketDropUnexpectedPacket,
+				},
+			},
+			eventRecorder.Events(qlog.PacketDropped{}),
+		)
+
+		// only a single listener can be set
+		_, err = tr.Listen(&tls.Config{}, nil)
+		require.Error(t, err)
+		require.ErrorIs(t, err, errListenerAlreadySet)
+
+		require.NoError(t, ln.Close())
+		// now it's possible to add a new listener
+		ln, err = tr.Listen(&tls.Config{}, nil)
+		require.NoError(t, err)
+		defer ln.Close()
+	})
 }
 
 func TestTransportNonQUICPackets(t *testing.T) {
-	tr := &Transport{Conn: newUPDConnLocalhost(t)}
-	defer tr.Close()
+	synctest.Test(t, func(t *testing.T) {
+		const rtt = 10 * time.Millisecond
+		clientConn, serverConn, closeFn := newSimnetLink(t, rtt)
+		defer closeFn()
 
-	ctx, cancel := context.WithTimeout(context.Background(), scaleDuration(5*time.Millisecond))
-	defer cancel()
-	_, _, err := tr.ReadNonQUICPacket(ctx, make([]byte, 1024))
-	require.Error(t, err)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
+		tr := &Transport{Conn: serverConn}
+		defer tr.Close()
 
-	conn := newUPDConnLocalhost(t)
-	data := []byte{0 /* don't set the QUIC bit */, 1, 2, 3}
-	_, err = conn.WriteTo(data, tr.Conn.LocalAddr())
-	require.NoError(t, err)
-	_, err = conn.WriteTo(data, tr.Conn.LocalAddr())
-	require.NoError(t, err)
-
-	ctx, cancel = context.WithTimeout(context.Background(), scaleDuration(time.Second))
-	defer cancel()
-	b := make([]byte, 1024)
-	n, addr, err := tr.ReadNonQUICPacket(ctx, b)
-	require.NoError(t, err)
-	require.Equal(t, data, b[:n])
-	require.Equal(t, addr, conn.LocalAddr())
-
-	// now send a lot of packets without reading them
-	for i := range 2 * maxQueuedNonQUICPackets {
-		data := append([]byte{0 /* don't set the QUIC bit */, uint8(i)}, bytes.Repeat([]byte{uint8(i)}, 1000)...)
-		_, err = conn.WriteTo(data, tr.Conn.LocalAddr())
-		require.NoError(t, err)
-	}
-	time.Sleep(scaleDuration(10 * time.Millisecond))
-
-	var received int
-	for {
-		ctx, cancel = context.WithTimeout(context.Background(), scaleDuration(20*time.Millisecond))
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 		defer cancel()
-		_, _, err := tr.ReadNonQUICPacket(ctx, b)
-		if errors.Is(err, context.DeadlineExceeded) {
-			break
-		}
+		_, _, err := tr.ReadNonQUICPacket(ctx, make([]byte, 1024))
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+
+		data := []byte{0 /* don't set the QUIC bit */, 1, 2, 3}
+		_, err = clientConn.WriteTo(data, tr.Conn.LocalAddr())
 		require.NoError(t, err)
-		received++
-	}
-	require.Equal(t, received, maxQueuedNonQUICPackets)
+		_, err = clientConn.WriteTo(data, tr.Conn.LocalAddr())
+		require.NoError(t, err)
+
+		ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		b := make([]byte, 1024)
+		n, addr, err := tr.ReadNonQUICPacket(ctx, b)
+		require.NoError(t, err)
+		require.Equal(t, data, b[:n])
+		require.Equal(t, addr, clientConn.LocalAddr())
+
+		// now send a lot of packets without reading them
+		for i := range 2 * maxQueuedNonQUICPackets {
+			data := append([]byte{0 /* don't set the QUIC bit */, uint8(i)}, bytes.Repeat([]byte{uint8(i)}, 1000)...)
+			_, err = clientConn.WriteTo(data, tr.Conn.LocalAddr())
+			require.NoError(t, err)
+		}
+
+		time.Sleep(rtt) // so that all packets arrive at the server
+
+		var received int
+		for {
+			ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			_, _, err := tr.ReadNonQUICPacket(ctx, b)
+			if errors.Is(err, context.DeadlineExceeded) {
+				break
+			}
+			require.NoError(t, err)
+			received++
+		}
+		require.Equal(t, received, maxQueuedNonQUICPackets)
+	})
 }
 
 type faultySyscallConn struct{ net.PacketConn }
 
-func (c *faultySyscallConn) SyscallConn() (syscall.RawConn, error) { return nil, errors.New("mocked") }
+func (c *faultySyscallConn) SyscallConn() (syscall.RawConn, error) { return nil, assert.AnError }
 
 func TestTransportFaultySyscallConn(t *testing.T) {
-	syscallconn := &faultySyscallConn{PacketConn: newUPDConnLocalhost(t)}
+	syscallconn := &faultySyscallConn{PacketConn: newUDPConnLocalhost(t)}
 
 	tr := &Transport{Conn: syscallconn}
 	_, err := tr.Listen(&tls.Config{}, nil)
 	require.Error(t, err)
-	require.ErrorContains(t, err, "mocked")
+	require.ErrorIs(t, err, assert.AnError)
 }
 
 func TestTransportSetTLSConfigServerName(t *testing.T) {
@@ -492,88 +497,93 @@ func testTransportDial(t *testing.T, early bool) {
 	originalClientConnConstructor := newClientConnection
 	t.Cleanup(func() { newClientConnection = originalClientConnConstructor })
 
-	mockCtrl := gomock.NewController(t)
-	conn := NewMockQUICConn(mockCtrl)
-	handshakeChan := make(chan struct{})
-	if early {
-		conn.EXPECT().earlyConnReady().Return(handshakeChan)
-		conn.EXPECT().HandshakeComplete().Return(make(chan struct{}))
-	} else {
-		conn.EXPECT().HandshakeComplete().Return(handshakeChan)
-	}
-	blockRun := make(chan struct{})
-	conn.EXPECT().run().DoAndReturn(func() error {
-		<-blockRun
-		return errors.New("done")
-	})
-	defer close(blockRun)
+	synctest.Test(t, func(t *testing.T) {
+		_, serverConn, closeFn := newSimnetLink(t, 10*time.Millisecond)
+		defer closeFn()
 
-	newClientConnection = func(
-		_ context.Context,
-		_ sendConn,
-		_ connRunner,
-		_ protocol.ConnectionID,
-		_ protocol.ConnectionID,
-		_ ConnectionIDGenerator,
-		_ *statelessResetter,
-		_ *Config,
-		_ *tls.Config,
-		_ protocol.PacketNumber,
-		_ bool,
-		_ bool,
-		_ *logging.ConnectionTracer,
-		_ utils.Logger,
-		_ protocol.Version,
-	) quicConn {
-		return conn
-	}
-
-	tr := &Transport{Conn: newUPDConnLocalhost(t)}
-	tr.init(true)
-	defer tr.Close()
-
-	errChan := make(chan error, 1)
-	go func() {
-		var err error
+		var conn *connTestHooks
+		handshakeChan := make(chan struct{})
+		blockRun := make(chan struct{})
 		if early {
-			_, err = tr.DialEarly(context.Background(), nil, &tls.Config{}, nil)
+			conn = &connTestHooks{
+				earlyConnReady:    func() <-chan struct{} { return handshakeChan },
+				handshakeComplete: func() <-chan struct{} { return make(chan struct{}) },
+			}
 		} else {
-			_, err = tr.Dial(context.Background(), nil, &tls.Config{}, nil)
+			conn = &connTestHooks{
+				handshakeComplete: func() <-chan struct{} { return handshakeChan },
+			}
 		}
-		errChan <- err
-	}()
+		conn.run = func() error { <-blockRun; return errors.New("done") }
+		defer close(blockRun)
 
-	select {
-	case <-errChan:
-		t.Fatal("Dial shouldn't have returned")
-	case <-time.After(scaleDuration(10 * time.Millisecond)):
-	}
+		newClientConnection = func(
+			_ context.Context,
+			_ sendConn,
+			_ connRunner,
+			_ protocol.ConnectionID,
+			_ protocol.ConnectionID,
+			_ ConnectionIDGenerator,
+			_ *statelessResetter,
+			_ *Config,
+			_ *tls.Config,
+			_ protocol.PacketNumber,
+			_ bool,
+			_ bool,
+			_ qlogwriter.Trace,
+			_ utils.Logger,
+			_ protocol.Version,
+		) *wrappedConn {
+			return &wrappedConn{testHooks: conn}
+		}
 
-	close(handshakeChan)
-	select {
-	case err := <-errChan:
-		require.NoError(t, err)
-	case <-time.After(time.Second):
-	}
+		tr := &Transport{Conn: serverConn}
+		tr.init(true)
+		defer tr.Close()
 
-	// for test tear-down
-	conn.EXPECT().destroy(gomock.Any()).AnyTimes()
+		errChan := make(chan error, 1)
+		go func() {
+			var err error
+			if early {
+				_, err = tr.DialEarly(context.Background(), nil, &tls.Config{}, nil)
+			} else {
+				_, err = tr.Dial(context.Background(), nil, &tls.Config{}, nil)
+			}
+			errChan <- err
+		}()
+
+		synctest.Wait()
+
+		select {
+		case <-errChan:
+			t.Fatal("Dial shouldn't have returned")
+		default:
+		}
+
+		close(handshakeChan)
+
+		synctest.Wait()
+
+		select {
+		case err := <-errChan:
+			require.NoError(t, err)
+		default:
+		}
+	})
 }
 
 func TestTransportDialingVersionNegotiation(t *testing.T) {
 	originalClientConnConstructor := newClientConnection
 	t.Cleanup(func() { newClientConnection = originalClientConnConstructor })
 
-	// connID := protocol.ParseConnectionID([]byte{1, 2, 3, 4, 5, 6, 7, 8})
-	mockCtrl := gomock.NewController(t)
-	// runner := NewMockConnRunner(mockCtrl)
-	conn := NewMockQUICConn(mockCtrl)
-	conn.EXPECT().HandshakeComplete().Return(make(chan struct{}))
-	conn.EXPECT().run().Return(&errCloseForRecreating{nextPacketNumber: 109, nextVersion: 789})
-
-	conn2 := NewMockQUICConn(mockCtrl)
-	conn2.EXPECT().HandshakeComplete().Return(make(chan struct{}))
-	conn2.EXPECT().run().Return(errors.New("test done"))
+	conn := &connTestHooks{
+		handshakeComplete: func() <-chan struct{} { return make(chan struct{}) },
+		run:               func() error { return &errCloseForRecreating{nextPacketNumber: 109, nextVersion: 789} },
+	}
+	conn2 := &connTestHooks{
+		handshakeComplete: func() <-chan struct{} { return make(chan struct{}) },
+		run:               func() error { return assert.AnError },
+	}
 
 	type connParams struct {
 		pn                   protocol.PacketNumber
@@ -596,24 +606,24 @@ func TestTransportDialingVersionNegotiation(t *testing.T) {
 		pn protocol.PacketNumber,
 		_ bool,
 		hasNegotiatedVersion bool,
-		_ *logging.ConnectionTracer,
+		_ qlogwriter.Trace,
 		_ utils.Logger,
 		v protocol.Version,
-	) quicConn {
+	) *wrappedConn {
 		connChan <- connParams{pn: pn, hasNegotiatedVersion: hasNegotiatedVersion, version: v}
 		if counter == 0 {
 			counter++
-			return conn
+			return &wrappedConn{testHooks: conn}
 		}
-		return conn2
+		return &wrappedConn{testHooks: conn2}
 	}
 
-	tr := &Transport{Conn: newUPDConnLocalhost(t)}
+	tr := &Transport{Conn: newUDPConnLocalhost(t)}
 	tr.init(true)
 	defer tr.Close()
 
 	_, err := tr.Dial(context.Background(), nil, &tls.Config{}, nil)
-	require.EqualError(t, err, "test done")
+	require.ErrorIs(t, err, assert.AnError)
 
 	select {
 	case params := <-connChan:
@@ -631,8 +641,106 @@ func TestTransportDialingVersionNegotiation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}
+}
 
-	// for test tear down
-	conn.EXPECT().destroy(gomock.Any()).AnyTimes()
-	conn2.EXPECT().destroy(gomock.Any()).AnyTimes()
+func TestTransportReplaceWithClosed(t *testing.T) {
+	// synctest works slightly differently on Go 1.24,
+	// so we skip the test
+	if strings.HasPrefix(runtime.Version(), "go1.24") {
+		t.Skip("skipping on Go 1.24 due to synctest issues")
+	}
+	t.Run("local", func(t *testing.T) {
+		testTransportReplaceWithClosed(t, true)
+	})
+	t.Run("remote", func(t *testing.T) {
+		testTransportReplaceWithClosed(t, false)
+	})
+}
+
+func testTransportReplaceWithClosed(t *testing.T, local bool) {
+	synctest.Test(t, func(t *testing.T) {
+		clientConn, serverConn, closeFn := newSimnetLink(t, 10*time.Millisecond)
+		defer closeFn()
+
+		srk := StatelessResetKey{1, 2, 3, 4}
+		tr := &Transport{
+			Conn:               serverConn,
+			ConnectionIDLength: 4,
+			StatelessResetKey:  &srk,
+		}
+		tr.init(true)
+		defer tr.Close()
+
+		var closePacket []byte
+		if local {
+			closePacket = []byte("foobar")
+		}
+
+		const expiry = 50 * time.Millisecond
+		handler := &mockPacketHandler{}
+		connID := protocol.ParseConnectionID([]byte{4, 3, 2, 1})
+		m := (*packetHandlerMap)(tr)
+		require.True(t, m.Add(connID, handler))
+		m.ReplaceWithClosed([]protocol.ConnectionID{connID}, closePacket, expiry)
+
+		p := make([]byte, 100)
+		p[0] = 0x40 // QUIC bit
+		copy(p[1:], connID.Bytes())
+
+		var sent atomic.Int64
+		errChan := make(chan error, 1)
+		stopSending := make(chan struct{})
+		go func() {
+			defer close(errChan)
+			ticker := time.NewTicker(expiry / 200)
+			timeout := time.NewTimer(time.Second)
+			for {
+				select {
+				case <-stopSending:
+					return
+				case <-timeout.C:
+					errChan <- errors.New("timeout")
+					return
+				case <-ticker.C:
+				}
+				if _, err := clientConn.WriteTo(p, tr.Conn.LocalAddr()); err != nil {
+					errChan <- err
+					return
+				}
+				sent.Add(1)
+			}
+		}()
+
+		// For locally closed connections, CONNECTION_CLOSE packets are sent with an exponential backoff
+		var received int
+		clientConn.SetReadDeadline(time.Now().Add(time.Hour))
+		for {
+			b := make([]byte, 100)
+			n, _, err := clientConn.ReadFrom(b)
+			require.NoError(t, err)
+			// at some point, the connection is cleaned up, and we'll receive a stateless reset
+			if !bytes.Equal(b[:n], []byte("foobar")) {
+				require.GreaterOrEqual(t, n, protocol.MinStatelessResetSize)
+				close(stopSending) // stop sending packets
+				break
+			}
+			received++
+		}
+
+		select {
+		case err := <-errChan:
+			require.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("timeout")
+		}
+
+		numSent := sent.Load()
+		if !local {
+			require.Zero(t, received)
+			t.Logf("sent %d packets", numSent)
+			return
+		}
+		t.Logf("sent %d packets, received %d CONNECTION_CLOSE copies", numSent, received)
+		require.Equal(t, int(math.Ceil(math.Log2(float64(numSent)))), received)
+	})
 }

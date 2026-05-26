@@ -10,17 +10,18 @@ import (
 	"testing"
 	"time"
 
-	quic "github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic"
 	quicproxy "github.com/refraction-networking/uquic/integrationtests/tools/proxy"
 	"github.com/refraction-networking/uquic/internal/protocol"
-	"github.com/refraction-networking/uquic/logging"
+	"github.com/refraction-networking/uquic/qlog"
+	"github.com/refraction-networking/uquic/testutils/events"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestInitialPacketSize(t *testing.T) {
-	server := newUPDConnLocalhost(t)
-	client := newUPDConnLocalhost(t)
+	server := newUDPConnLocalhost(t)
+	client := newUDPConnLocalhost(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -46,7 +47,7 @@ func TestPathMTUDiscovery(t *testing.T) {
 	const mtu = 1400
 
 	ln, err := quic.Listen(
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		getTLSConfig(),
 		getQuicConfig(&quic.Config{
 			InitialPacketSize:       1234,
@@ -80,10 +81,10 @@ func TestPathMTUDiscovery(t *testing.T) {
 	var maxPacketSizeServer int
 	var clientPacketSizes []int
 	proxy := &quicproxy.Proxy{
-		Conn:        newUPDConnLocalhost(t),
+		Conn:        newUDPConnLocalhost(t),
 		ServerAddr:  ln.Addr().(*net.UDPAddr),
-		DelayPacket: func(_ quicproxy.Direction, _ []byte) time.Duration { return rtt / 2 },
-		DropPacket: func(dir quicproxy.Direction, packet []byte) bool {
+		DelayPacket: func(quicproxy.Direction, net.Addr, net.Addr, []byte) time.Duration { return rtt / 2 },
+		DropPacket: func(dir quicproxy.Direction, _, _ net.Addr, packet []byte) bool {
 			if len(packet) > mtu {
 				return true
 			}
@@ -105,10 +106,10 @@ func TestPathMTUDiscovery(t *testing.T) {
 
 	// Make sure to use v4-only socket here.
 	// We can't reliably set the DF bit on dual-stack sockets on older versions of macOS (before Sequoia).
-	tr := &quic.Transport{Conn: newUPDConnLocalhost(t)}
+	tr := &quic.Transport{Conn: newUDPConnLocalhost(t)}
 	defer tr.Close()
 
-	var mtus []logging.ByteCount
+	var eventRecorder events.Recorder
 	conn, err := tr.Dial(
 		context.Background(),
 		proxy.LocalAddr(),
@@ -116,11 +117,7 @@ func TestPathMTUDiscovery(t *testing.T) {
 		getQuicConfig(&quic.Config{
 			InitialPacketSize: protocol.MinInitialPacketSize,
 			EnableDatagrams:   true,
-			Tracer: func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer {
-				return &logging.ConnectionTracer{
-					UpdatedMTU: func(mtu logging.ByteCount, _ bool) { mtus = append(mtus, mtu) },
-				}
-			},
+			Tracer:            newTracer(&eventRecorder),
 		}),
 	)
 	require.NoError(t, err)
@@ -169,9 +166,14 @@ func TestPathMTUDiscovery(t *testing.T) {
 
 	mx.Lock()
 	defer mx.Unlock()
-	require.NotEmpty(t, mtus)
+	require.NotEmpty(t, eventRecorder.Events(qlog.MTUUpdated{}))
 
-	maxPacketSizeClient := int(mtus[len(mtus)-1])
+	var mtus []int
+	for _, ev := range eventRecorder.Events(qlog.MTUUpdated{}) {
+		mtus = append(mtus, ev.(qlog.MTUUpdated).Value)
+	}
+
+	maxPacketSizeClient := mtus[len(mtus)-1]
 	t.Logf("max client packet size: %d, MTU: %d", maxPacketSizeClient, mtu)
 	t.Logf("max datagram size: initial: %d, final: %d", initialMaxDatagramSize, finalMaxDatagramSize)
 	t.Logf("max server packet size: %d, MTU: %d", maxPacketSizeServer, mtu)

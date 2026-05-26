@@ -2,101 +2,112 @@ package self_test
 
 import (
 	"context"
-	"errors"
+	"crypto/tls"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	tls "github.com/refraction-networking/utls"
-
-	quic "github.com/refraction-networking/uquic"
-	quicproxy "github.com/refraction-networking/uquic/integrationtests/tools/proxy"
+	"github.com/refraction-networking/uquic"
 	"github.com/refraction-networking/uquic/internal/protocol"
+	"github.com/refraction-networking/uquic/internal/synctest"
+	"github.com/refraction-networking/uquic/testutils/simnet"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestConnectionCloseRetransmission(t *testing.T) {
-	server, err := quic.Listen(
-		newUPDConnLocalhost(t),
-		getTLSConfig(),
-		getQuicConfig(&quic.Config{DisablePathMTUDiscovery: true}),
-	)
-	require.NoError(t, err)
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		const rtt = 10 * time.Millisecond
+		serverAddr := &net.UDPAddr{IP: net.ParseIP("1.0.0.2"), Port: 9002}
 
-	var drop atomic.Bool
-	dropped := make(chan []byte, 100)
-	proxy := &quicproxy.Proxy{
-		Conn:       newUPDConnLocalhost(t),
-		ServerAddr: server.Addr().(*net.UDPAddr),
-		DelayPacket: func(_ quicproxy.Direction, _ []byte) time.Duration {
-			return 5 * time.Millisecond // 10ms RTT
-		},
-		DropPacket: func(dir quicproxy.Direction, b []byte) bool {
-			if drop := drop.Load(); drop && dir == quicproxy.DirectionOutgoing {
-				dropped <- b
-				return true
-			}
-			return false
-		},
-	}
-	require.NoError(t, proxy.Start())
-	defer proxy.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	conn, err := quic.Dial(ctx, newUPDConnLocalhost(t), proxy.LocalAddr(), getTLSClientConfig(), getQuicConfig(nil))
-	require.NoError(t, err)
-	defer conn.CloseWithError(0, "")
-
-	sconn, err := server.Accept(ctx)
-	require.NoError(t, err)
-	time.Sleep(100 * time.Millisecond)
-	drop.Store(true)
-	sconn.CloseWithError(1337, "closing")
-
-	// send 100 packets
-	for i := 0; i < 100; i++ {
-		str, err := conn.OpenStream()
-		require.NoError(t, err)
-		_, err = str.Write([]byte("foobar"))
-		require.NoError(t, err)
-		time.Sleep(time.Millisecond)
-	}
-
-	// Expect retransmissions of the CONNECTION_CLOSE for the
-	// 1st, 2nd, 4th, 8th, 16th, 32th, 64th packet: 7 in total (+1 for the original packet)
-	var packets [][]byte
-	for i := 0; i < 8; i++ {
-		select {
-		case p := <-dropped:
-			packets = append(packets, p)
-		case <-time.After(time.Second):
-			t.Fatal("timeout waiting for CONNECTION_CLOSE retransmission")
+		var drop atomic.Bool
+		var mx sync.Mutex
+		var dropped [][]byte
+		n := &simnet.Simnet{
+			Router: &droppingRouter{Drop: func(p simnet.Packet) bool {
+				shouldDrop := drop.Load() && p.From.String() == serverAddr.String()
+				if shouldDrop {
+					mx.Lock()
+					dropped = append(dropped, p.Data)
+					mx.Unlock()
+				}
+				return shouldDrop
+			}},
 		}
-	}
+		settings := simnet.NodeBiDiLinkSettings{Latency: rtt / 2}
+		clientConn := n.NewEndpoint(&net.UDPAddr{IP: net.ParseIP("1.0.0.1"), Port: 9001}, settings)
+		serverConn := n.NewEndpoint(serverAddr, settings)
+		require.NoError(t, n.Start())
+		defer n.Close()
 
-	// verify all retransmitted packets were identical
-	for i := 1; i < len(packets); i++ {
-		require.Equal(t, packets[0], packets[i])
-	}
+		tr := &quic.Transport{Conn: serverConn}
+		defer tr.Close()
+		server, err := tr.Listen(
+			getTLSConfig(),
+			getQuicConfig(&quic.Config{DisablePathMTUDiscovery: true}),
+		)
+		require.NoError(t, err)
+		defer server.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		conn, err := quic.Dial(ctx, clientConn, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+		require.NoError(t, err)
+		defer conn.CloseWithError(0, "")
+
+		sconn, err := server.Accept(ctx)
+		require.NoError(t, err)
+
+		time.Sleep(rtt)
+
+		drop.Store(true)
+		sconn.CloseWithError(1337, "closing")
+
+		// send 100 packets
+		for range 100 {
+			str, err := conn.OpenStream()
+			require.NoError(t, err)
+			_, err = str.Write([]byte("foobar"))
+			require.NoError(t, err)
+
+			// A closed connection will drop packets if a very short queue overflows.
+			// Waiting for one nanosecond makes synctest process the packet before advancing
+			// the synthetic clock.
+			time.Sleep(time.Nanosecond)
+		}
+
+		time.Sleep(rtt)
+
+		mx.Lock()
+		defer mx.Unlock()
+
+		// Expect retransmissions of the CONNECTION_CLOSE for the
+		// 1st, 2nd, 4th, 8th, 16th, 32th, 64th packet: 7 in total (+1 for the original packet)
+		require.Len(t, dropped, 8)
+
+		// verify all retransmitted packets were identical
+		for i := 1; i < len(dropped); i++ {
+			require.Equal(t, dropped[0], dropped[i])
+		}
+	})
 }
 
 func TestDrainServerAcceptQueue(t *testing.T) {
-	server, err := quic.Listen(newUPDConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
+	server, err := quic.Listen(newUDPConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 	defer server.Close()
 
-	dialer := &quic.Transport{Conn: newUPDConnLocalhost(t)}
+	dialer := &quic.Transport{Conn: newUDPConnLocalhost(t)}
 	defer dialer.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	// fill up the accept queue
-	conns := make([]quic.Connection, 0, protocol.MaxAcceptQueueSize)
-	for i := 0; i < protocol.MaxAcceptQueueSize; i++ {
+	conns := make([]*quic.Conn, 0, protocol.MaxAcceptQueueSize)
+	for range protocol.MaxAcceptQueueSize {
 		conn, err := dialer.Dial(ctx, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
 		require.NoError(t, err)
 		conns = append(conns, conn)
@@ -108,9 +119,8 @@ func TestDrainServerAcceptQueue(t *testing.T) {
 		c, err := server.Accept(ctx)
 		require.NoError(t, err)
 		// make sure the connection is not closed
-		require.NoError(t, conns[i].Context().Err(), "client connection closed")
-		require.NoError(t, c.Context().Err(), "server connection closed")
-		conns[i].CloseWithError(0, "")
+		require.NoError(t, context.Cause(conns[i].Context()), "client connection closed")
+		require.NoError(t, context.Cause(c.Context()), "server connection closed")
 		c.CloseWithError(0, "")
 	}
 	_, err = server.Accept(ctx)
@@ -132,7 +142,7 @@ func newBrokenConn(conn net.PacketConn) *brokenConn {
 	go func() {
 		<-c.broken
 		// make calls to ReadFrom return
-		c.PacketConn.SetDeadline(time.Now())
+		c.SetDeadline(time.Now())
 	}()
 	return c
 }
@@ -159,21 +169,20 @@ func (c *brokenConn) Break(e error) {
 
 func TestTransportClose(t *testing.T) {
 	t.Run("Close", func(t *testing.T) {
-		conn := newUPDConnLocalhost(t)
+		conn := newUDPConnLocalhost(t)
 		testTransportClose(t, conn, func() { conn.Close() }, nil)
 	})
 
 	t.Run("connection error", func(t *testing.T) {
 		t.Setenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING", "true")
 
-		bc := newBrokenConn(newUPDConnLocalhost(t))
-		testErr := errors.New("test error")
-		testTransportClose(t, bc, func() { bc.Break(testErr) }, testErr)
+		bc := newBrokenConn(newUDPConnLocalhost(t))
+		testTransportClose(t, bc, func() { bc.Break(assert.AnError) }, assert.AnError)
 	})
 }
 
 func testTransportClose(t *testing.T, conn net.PacketConn, closeFn func(), expectedErr error) {
-	server := newUPDConnLocalhost(t)
+	server := newUDPConnLocalhost(t)
 	tr := &quic.Transport{Conn: conn}
 
 	errChan := make(chan error, 1)

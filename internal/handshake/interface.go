@@ -2,12 +2,11 @@ package handshake
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
-	"time"
 
-	tls "github.com/refraction-networking/utls"
-
+	"github.com/refraction-networking/uquic/internal/monotime"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/wire"
 )
@@ -39,7 +38,7 @@ type LongHeaderOpener interface {
 type ShortHeaderOpener interface {
 	headerDecryptor
 	DecodePacketNumber(wirePN protocol.PacketNumber, wirePNLen protocol.PacketNumberLen) protocol.PacketNumber
-	Open(dst, src []byte, rcvTime time.Time, pn protocol.PacketNumber, kp protocol.KeyPhaseBit, associatedData []byte) ([]byte, error)
+	Open(dst, src []byte, rcvTime monotime.Time, pn protocol.PacketNumber, kp protocol.KeyPhaseBit, associatedData []byte) ([]byte, error)
 }
 
 // LongHeaderSealer seals a long header packet

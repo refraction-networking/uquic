@@ -9,9 +9,10 @@ import (
 	"testing"
 	"time"
 
-	quic "github.com/refraction-networking/uquic"
-	quicproxy "github.com/refraction-networking/uquic/integrationtests/tools/proxy"
+	"github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic/internal/synctest"
 	"github.com/refraction-networking/uquic/internal/wire"
+	"github.com/refraction-networking/uquic/testutils/simnet"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,7 +35,7 @@ func TestDatagramNegotiation(t *testing.T) {
 
 func testDatagramNegotiation(t *testing.T, serverEnableDatagram, clientEnableDatagram bool) {
 	server, err := quic.Listen(
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		getTLSConfig(),
 		getQuicConfig(&quic.Config{EnableDatagrams: serverEnableDatagram}),
 	)
@@ -45,7 +46,7 @@ func testDatagramNegotiation(t *testing.T, serverEnableDatagram, clientEnableDat
 	defer cancel()
 	clientConn, err := quic.Dial(
 		ctx,
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		server.Addr(),
 		getTLSClientConfig(),
 		getQuicConfig(&quic.Config{EnableDatagrams: clientEnableDatagram}),
@@ -57,25 +58,28 @@ func testDatagramNegotiation(t *testing.T, serverEnableDatagram, clientEnableDat
 	require.NoError(t, err)
 	defer serverConn.CloseWithError(0, "")
 
+	serverState := serverConn.ConnectionState().SupportsDatagrams
+	clientState := clientConn.ConnectionState().SupportsDatagrams
+	require.Equal(t, serverEnableDatagram, serverState.Local, "server local datagram support")
+	require.Equal(t, clientEnableDatagram, serverState.Remote, "server view of client datagram support")
+	require.Equal(t, clientEnableDatagram, clientState.Local, "client local datagram support")
+	require.Equal(t, serverEnableDatagram, clientState.Remote, "client view of server datagram support")
+
 	if clientEnableDatagram {
-		require.True(t, serverConn.ConnectionState().SupportsDatagrams)
 		require.NoError(t, serverConn.SendDatagram([]byte("foo")))
 		datagram, err := clientConn.ReceiveDatagram(ctx)
 		require.NoError(t, err)
 		require.Equal(t, []byte("foo"), datagram)
 	} else {
-		require.False(t, serverConn.ConnectionState().SupportsDatagrams)
 		require.Error(t, serverConn.SendDatagram([]byte("foo")))
 	}
 
 	if serverEnableDatagram {
-		require.True(t, clientConn.ConnectionState().SupportsDatagrams)
 		require.NoError(t, clientConn.SendDatagram([]byte("bar")))
 		datagram, err := serverConn.ReceiveDatagram(ctx)
 		require.NoError(t, err)
 		require.Equal(t, []byte("bar"), datagram)
 	} else {
-		require.False(t, clientConn.ConnectionState().SupportsDatagrams)
 		require.Error(t, clientConn.SendDatagram([]byte("bar")))
 	}
 }
@@ -87,7 +91,7 @@ func TestDatagramSizeLimit(t *testing.T) {
 	t.Cleanup(func() { wire.MaxDatagramSize = originalMaxDatagramSize })
 
 	server, err := quic.Listen(
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		getTLSConfig(),
 		getQuicConfig(&quic.Config{EnableDatagrams: true}),
 	)
@@ -98,7 +102,7 @@ func TestDatagramSizeLimit(t *testing.T) {
 	defer cancel()
 	clientConn, err := quic.Dial(
 		ctx,
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		server.Addr(),
 		getTLSClientConfig(),
 		getQuicConfig(&quic.Config{EnableDatagrams: true}),
@@ -124,114 +128,126 @@ func TestDatagramSizeLimit(t *testing.T) {
 }
 
 func TestDatagramLoss(t *testing.T) {
-	const rtt = 10 * time.Millisecond
-	const numDatagrams = 100
-	const datagramSize = 500
+	synctest.Test(t, func(t *testing.T) {
+		const rtt = 100 * time.Millisecond
+		const numDatagrams = 100
+		const datagramSize = 500
 
-	server, err := quic.Listen(
-		newUPDConnLocalhost(t),
-		getTLSConfig(),
-		getQuicConfig(&quic.Config{EnableDatagrams: true}),
-	)
-	require.NoError(t, err)
-	defer server.Close()
+		clientAddr := &net.UDPAddr{IP: net.ParseIP("1.0.0.1"), Port: 9001}
+		serverAddr := &net.UDPAddr{IP: net.ParseIP("1.0.0.2"), Port: 9002}
+		var droppedToClient, droppedToServer, total atomic.Int32
+		n := &simnet.Simnet{
+			Router: &directionAwareDroppingRouter{
+				ClientAddr: clientAddr,
+				ServerAddr: serverAddr,
+				Drop: func(d direction, p simnet.Packet) bool {
+					if wire.IsLongHeaderPacket(p.Data[0]) { // don't drop Long Header packets
+						return false
+					}
+					if len(p.Data) < datagramSize { // don't drop ACK-only packets
+						return false
+					}
+					total.Add(1)
+					// drop about 20% of Short Header packets with DATAGRAM frames
+					if mrand.Int()%5 == 0 {
+						switch d {
+						case directionToClient:
+							droppedToClient.Add(1)
+						case directionToServer:
+							droppedToServer.Add(1)
+						}
+						return true
+					}
+					return false
+				},
+			},
+		}
+		settings := simnet.NodeBiDiLinkSettings{Latency: rtt / 2}
+		clientPacketConn := n.NewEndpoint(clientAddr, settings)
+		defer clientPacketConn.Close()
+		serverPacketConn := n.NewEndpoint(serverAddr, settings)
+		defer serverPacketConn.Close()
+		require.NoError(t, n.Start())
+		defer n.Close()
 
-	var droppedIncoming, droppedOutgoing, total atomic.Int32
-	proxy := &quicproxy.Proxy{
-		Conn:       newUPDConnLocalhost(t),
-		ServerAddr: server.Addr().(*net.UDPAddr),
-		DropPacket: func(dir quicproxy.Direction, packet []byte) bool {
-			if wire.IsLongHeaderPacket(packet[0]) { // don't drop Long Header packets
-				return false
-			}
-			if len(packet) < datagramSize { // don't drop ACK-only packets
-				return false
-			}
-			total.Add(1)
-			if mrand.Int()%10 == 0 {
-				switch dir {
-				case quicproxy.DirectionIncoming:
-					droppedIncoming.Add(1)
-				case quicproxy.DirectionOutgoing:
-					droppedOutgoing.Add(1)
+		server, err := quic.Listen(
+			serverPacketConn,
+			getTLSConfig(),
+			getQuicConfig(&quic.Config{DisablePathMTUDiscovery: true, EnableDatagrams: true}),
+		)
+		require.NoError(t, err)
+		defer server.Close()
+
+		const sendInterval = time.Second // send a datagram every second
+		ctx, cancel := context.WithTimeout(context.Background(), (numDatagrams+10)*sendInterval)
+		defer cancel()
+		clientConn, err := quic.Dial(
+			ctx,
+			clientPacketConn,
+			serverPacketConn.LocalAddr(),
+			getTLSClientConfig(),
+			getQuicConfig(&quic.Config{DisablePathMTUDiscovery: true, EnableDatagrams: true}),
+		)
+		require.NoError(t, err)
+		defer clientConn.CloseWithError(0, "")
+
+		serverConn, err := server.Accept(ctx)
+		require.NoError(t, err)
+		defer serverConn.CloseWithError(0, "")
+
+		var clientDatagrams, serverDatagrams int
+		clientErrChan := make(chan error, 1)
+		go func() {
+			defer close(clientErrChan)
+			for {
+				if _, err := clientConn.ReceiveDatagram(ctx); err != nil {
+					clientErrChan <- err
+					return
 				}
-				return true
+				clientDatagrams++
 			}
-			return false
-		},
-		DelayPacket: func(_ quicproxy.Direction, _ []byte) time.Duration { return rtt / 2 },
-	}
-	require.NoError(t, proxy.Start())
-	defer proxy.Close()
+		}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), scaleDuration(numDatagrams*time.Millisecond))
-	defer cancel()
-	clientConn, err := quic.Dial(
-		ctx,
-		newUPDConnLocalhost(t),
-		proxy.LocalAddr(),
-		getTLSClientConfig(),
-		getQuicConfig(&quic.Config{EnableDatagrams: true}),
-	)
-	require.NoError(t, err)
-	defer clientConn.CloseWithError(0, "")
-
-	serverConn, err := server.Accept(ctx)
-	require.NoError(t, err)
-	defer serverConn.CloseWithError(0, "")
-
-	var clientDatagrams, serverDatagrams int
-	clientErrChan := make(chan error, 1)
-	go func() {
-		defer close(clientErrChan)
-		for {
-			if _, err := clientConn.ReceiveDatagram(ctx); err != nil {
-				clientErrChan <- err
-				return
-			}
-			clientDatagrams++
+		for i := range numDatagrams {
+			payload := bytes.Repeat([]byte{uint8(i)}, datagramSize)
+			require.NoError(t, clientConn.SendDatagram(payload))
+			require.NoError(t, serverConn.SendDatagram(payload))
+			time.Sleep(sendInterval)
 		}
-	}()
 
-	for i := 0; i < numDatagrams; i++ {
-		payload := bytes.Repeat([]byte{uint8(i)}, datagramSize)
-		require.NoError(t, clientConn.SendDatagram(payload))
-		require.NoError(t, serverConn.SendDatagram(payload))
-		time.Sleep(scaleDuration(time.Millisecond / 2))
-	}
-
-	serverErrChan := make(chan error, 1)
-	go func() {
-		defer close(serverErrChan)
-		for {
-			if _, err := serverConn.ReceiveDatagram(ctx); err != nil {
-				serverErrChan <- err
-				return
+		serverErrChan := make(chan error, 1)
+		go func() {
+			defer close(serverErrChan)
+			for {
+				if _, err := serverConn.ReceiveDatagram(ctx); err != nil {
+					serverErrChan <- err
+					return
+				}
+				serverDatagrams++
 			}
-			serverDatagrams++
+		}()
+
+		select {
+		case err := <-clientErrChan:
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+		case <-time.After(5 * numDatagrams * sendInterval):
+			t.Fatal("timeout")
 		}
-	}()
+		select {
+		case err := <-serverErrChan:
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+		case <-time.After(5 * numDatagrams * sendInterval):
+			t.Fatal("timeout")
+		}
 
-	select {
-	case err := <-clientErrChan:
-		require.ErrorIs(t, err, context.DeadlineExceeded)
-	case <-time.After(scaleDuration(5 * numDatagrams * time.Millisecond)):
-		t.Fatal("timeout")
-	}
-	select {
-	case err := <-serverErrChan:
-		require.ErrorIs(t, err, context.DeadlineExceeded)
-	case <-time.After(scaleDuration(5 * numDatagrams * time.Millisecond)):
-		t.Fatal("timeout")
-	}
-
-	numDroppedIncoming := droppedIncoming.Load()
-	numDroppedOutgoing := droppedOutgoing.Load()
-	t.Logf("dropped %d incoming and %d outgoing out of %d packets", numDroppedIncoming, numDroppedOutgoing, total.Load())
-	assert.NotZero(t, numDroppedIncoming)
-	assert.NotZero(t, numDroppedOutgoing)
-	t.Logf("server received %d out of %d sent datagrams", serverDatagrams, numDatagrams)
-	assert.InDelta(t, numDatagrams-numDroppedIncoming, serverDatagrams, numDatagrams/20, "datagrams received by the server")
-	t.Logf("client received %d out of %d sent datagrams", clientDatagrams, numDatagrams)
-	assert.InDelta(t, numDatagrams-numDroppedOutgoing, clientDatagrams, numDatagrams/20, "datagrams received by the client")
+		numDroppedToClient := droppedToClient.Load()
+		numDroppedToServer := droppedToServer.Load()
+		t.Logf("dropped %d to client and %d to server out of %d packets", numDroppedToClient, numDroppedToServer, total.Load())
+		assert.NotZero(t, numDroppedToClient)
+		assert.NotZero(t, numDroppedToServer)
+		t.Logf("server received %d out of %d sent datagrams", serverDatagrams, numDatagrams)
+		assert.EqualValues(t, numDatagrams-numDroppedToServer, serverDatagrams, "datagrams received by the server")
+		t.Logf("client received %d out of %d sent datagrams", clientDatagrams, numDatagrams)
+		assert.EqualValues(t, numDatagrams-numDroppedToClient, clientDatagrams, "datagrams received by the client")
+	})
 }

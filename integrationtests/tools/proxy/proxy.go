@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/refraction-networking/uquic/internal/monotime"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/utils"
 )
@@ -27,7 +28,7 @@ type connection struct {
 	Outgoing *queue
 }
 
-func (c *connection) queuePacket(t time.Time, b []byte) {
+func (c *connection) queuePacket(t monotime.Time, b []byte) {
 	c.incomingPackets <- packetEntry{Time: t, Raw: b}
 }
 
@@ -60,19 +61,20 @@ const (
 )
 
 type packetEntry struct {
-	Time time.Time
+	Time monotime.Time
 	Raw  []byte
 }
 
 type queue struct {
 	sync.Mutex
 
-	timer   *utils.Timer
+	timer   *time.Timer
 	Packets []packetEntry // sorted by the packetEntry.Time
 }
 
 func newQueue() *queue {
-	return &queue{timer: utils.NewTimer()}
+	// there's no way to initialize a time.Timer that's not running
+	return &queue{timer: time.NewTimer(24 * time.Hour)}
 }
 
 func (q *queue) Add(e packetEntry) {
@@ -81,7 +83,7 @@ func (q *queue) Add(e packetEntry) {
 
 	if len(q.Packets) == 0 {
 		q.Packets = append(q.Packets, e)
-		q.timer.Reset(e.Time)
+		q.timer.Reset(monotime.Until(e.Time))
 		return
 	}
 
@@ -96,7 +98,7 @@ func (q *queue) Add(e packetEntry) {
 		q.Packets = slices.Insert(q.Packets, idx, e)
 	}
 	if idx == 0 {
-		q.timer.Reset(q.Packets[0].Time)
+		q.timer.Reset(monotime.Until(q.Packets[0].Time))
 	}
 }
 
@@ -105,14 +107,13 @@ func (q *queue) Get() []byte {
 	raw := q.Packets[0].Raw
 	q.Packets = q.Packets[1:]
 	if len(q.Packets) > 0 {
-		q.timer.Reset(q.Packets[0].Time)
+		q.timer.Reset(monotime.Until(q.Packets[0].Time))
 	}
 	q.Unlock()
 	return raw
 }
 
-func (q *queue) Timer() <-chan time.Time { return q.timer.Chan() }
-func (q *queue) SetTimerRead()           { q.timer.SetRead() }
+func (q *queue) Timer() <-chan time.Time { return q.timer.C }
 
 func (q *queue) Close() { q.timer.Stop() }
 
@@ -139,10 +140,10 @@ func (d Direction) Is(dir Direction) bool {
 }
 
 // DropCallback is a callback that determines which packet gets dropped.
-type DropCallback func(dir Direction, packet []byte) bool
+type DropCallback func(dir Direction, from, to net.Addr, packet []byte) bool
 
 // DelayCallback is a callback that determines how much delay to apply to a packet.
-type DelayCallback func(dir Direction, packet []byte) time.Duration
+type DelayCallback func(dir Direction, from, to net.Addr, packet []byte) time.Duration
 
 // Proxy is a QUIC proxy that can drop and delay packets.
 type Proxy struct {
@@ -267,7 +268,7 @@ func (p *Proxy) runProxy() error {
 		}
 		p.mutex.Unlock()
 
-		if p.DropPacket != nil && p.DropPacket(DirectionIncoming, raw) {
+		if p.DropPacket != nil && p.DropPacket(DirectionIncoming, cliaddr, conn.ServerAddr, raw) {
 			if p.logger.Debug() {
 				p.logger.Debugf("dropping incoming packet(%d bytes)", n)
 			}
@@ -276,7 +277,7 @@ func (p *Proxy) runProxy() error {
 
 		var delay time.Duration
 		if p.DelayPacket != nil {
-			delay = p.DelayPacket(DirectionIncoming, raw)
+			delay = p.DelayPacket(DirectionIncoming, cliaddr, conn.ServerAddr, raw)
 		}
 		if delay == 0 {
 			if p.logger.Debug() {
@@ -286,7 +287,7 @@ func (p *Proxy) runProxy() error {
 				return err
 			}
 		} else {
-			now := time.Now()
+			now := monotime.Now()
 			if p.logger.Debug() {
 				p.logger.Debugf("delaying incoming packet (%d bytes) to %s by %s", len(raw), conn.ServerAddr, delay)
 			}
@@ -301,7 +302,7 @@ func (p *Proxy) runOutgoingConnection(conn *connection) error {
 	go func() {
 		for {
 			buffer := make([]byte, protocol.MaxPacketBufferSize)
-			n, err := conn.GetServerConn().Read(buffer)
+			n, addr, err := conn.GetServerConn().ReadFrom(buffer)
 			if err != nil {
 				// when the connection is switched out, we set a deadline on the old connection,
 				// in order to return it immediately
@@ -312,7 +313,7 @@ func (p *Proxy) runOutgoingConnection(conn *connection) error {
 			}
 			raw := buffer[0:n]
 
-			if p.DropPacket != nil && p.DropPacket(DirectionOutgoing, raw) {
+			if p.DropPacket != nil && p.DropPacket(DirectionOutgoing, addr, conn.ClientAddr, raw) {
 				if p.logger.Debug() {
 					p.logger.Debugf("dropping outgoing packet(%d bytes)", n)
 				}
@@ -321,7 +322,7 @@ func (p *Proxy) runOutgoingConnection(conn *connection) error {
 
 			var delay time.Duration
 			if p.DelayPacket != nil {
-				delay = p.DelayPacket(DirectionOutgoing, raw)
+				delay = p.DelayPacket(DirectionOutgoing, addr, conn.ClientAddr, raw)
 			}
 			if delay == 0 {
 				if p.logger.Debug() {
@@ -331,7 +332,7 @@ func (p *Proxy) runOutgoingConnection(conn *connection) error {
 					return
 				}
 			} else {
-				now := time.Now()
+				now := monotime.Now()
 				if p.logger.Debug() {
 					p.logger.Debugf("delaying outgoing packet (%d bytes) to %s by %s", len(raw), conn.ClientAddr, delay)
 				}
@@ -347,7 +348,6 @@ func (p *Proxy) runOutgoingConnection(conn *connection) error {
 		case e := <-outgoingPackets:
 			conn.Outgoing.Add(e)
 		case <-conn.Outgoing.Timer():
-			conn.Outgoing.SetTimerRead()
 			if _, err := p.Conn.WriteTo(conn.Outgoing.Get(), conn.ClientAddr); err != nil {
 				return err
 			}
@@ -364,7 +364,6 @@ func (p *Proxy) runIncomingConnection(conn *connection) error {
 			// Send the packet to the server
 			conn.Incoming.Add(e)
 		case <-conn.Incoming.Timer():
-			conn.Incoming.SetTimerRead()
 			if _, err := conn.GetServerConn().WriteTo(conn.Incoming.Get(), conn.ServerAddr); err != nil {
 				return err
 			}

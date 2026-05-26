@@ -18,7 +18,7 @@ import (
 func TestBidirectionalStreamMultiplexing(t *testing.T) {
 	const numStreams = 75
 
-	runSendingPeer := func(conn quic.Connection) error {
+	runSendingPeer := func(conn *quic.Conn) error {
 		g := new(errgroup.Group)
 		for i := 0; i < numStreams; i++ {
 			str, err := conn.OpenStreamSync(context.Background())
@@ -46,7 +46,7 @@ func TestBidirectionalStreamMultiplexing(t *testing.T) {
 		return g.Wait()
 	}
 
-	runReceivingPeer := func(conn quic.Connection) error {
+	runReceivingPeer := func(conn *quic.Conn) error {
 		g := new(errgroup.Group)
 		for i := 0; i < numStreams; i++ {
 			str, err := conn.AcceptStream(context.Background())
@@ -71,7 +71,7 @@ func TestBidirectionalStreamMultiplexing(t *testing.T) {
 
 	t.Run("client -> server", func(t *testing.T) {
 		ln, err := quic.Listen(
-			newUPDConnLocalhost(t),
+			newUDPConnLocalhost(t),
 			getTLSConfig(),
 			getQuicConfig(&quic.Config{
 				MaxIncomingStreams:             10,
@@ -86,7 +86,7 @@ func TestBidirectionalStreamMultiplexing(t *testing.T) {
 		defer cancel()
 		client, err := quic.Dial(
 			ctx,
-			newUPDConnLocalhost(t),
+			newUDPConnLocalhost(t),
 			ln.Addr(),
 			getTLSClientConfig(),
 			getQuicConfig(&quic.Config{InitialConnectionReceiveWindow: 2000}),
@@ -116,7 +116,7 @@ func TestBidirectionalStreamMultiplexing(t *testing.T) {
 
 	t.Run("client <-> server", func(t *testing.T) {
 		ln, err := quic.Listen(
-			newUPDConnLocalhost(t),
+			newUDPConnLocalhost(t),
 			getTLSConfig(),
 			getQuicConfig(&quic.Config{
 				MaxIncomingStreams:             30,
@@ -131,7 +131,7 @@ func TestBidirectionalStreamMultiplexing(t *testing.T) {
 		defer cancel()
 		client, err := quic.Dial(
 			ctx,
-			newUPDConnLocalhost(t),
+			newUDPConnLocalhost(t),
 			ln.Addr(),
 			getTLSClientConfig(),
 			getQuicConfig(&quic.Config{InitialConnectionReceiveWindow: 2000}),
@@ -174,7 +174,7 @@ func TestUnidirectionalStreams(t *testing.T) {
 
 	dataForStream := func(id uint64) []byte { return GeneratePRData(10 * int(id)) }
 
-	runSendingPeer := func(conn quic.Connection) error {
+	runSendingPeer := func(conn *quic.Conn) error {
 		g := new(errgroup.Group)
 		for i := 0; i < numStreams; i++ {
 			str, err := conn.OpenUniStreamSync(context.Background())
@@ -191,7 +191,7 @@ func TestUnidirectionalStreams(t *testing.T) {
 		return g.Wait()
 	}
 
-	runReceivingPeer := func(conn quic.Connection) error {
+	runReceivingPeer := func(conn *quic.Conn) error {
 		g := new(errgroup.Group)
 		for i := 0; i < numStreams; i++ {
 			str, err := conn.AcceptUniStream(context.Background())
@@ -214,7 +214,7 @@ func TestUnidirectionalStreams(t *testing.T) {
 
 	t.Run("client -> server", func(t *testing.T) {
 		ln, err := quic.Listen(
-			newUPDConnLocalhost(t),
+			newUDPConnLocalhost(t),
 			getTLSConfig(),
 			getQuicConfig(nil),
 		)
@@ -223,7 +223,7 @@ func TestUnidirectionalStreams(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		client, err := quic.Dial(ctx, newUPDConnLocalhost(t), ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+		client, err := quic.Dial(ctx, newUDPConnLocalhost(t), ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
 		require.NoError(t, err)
 
 		serverConn, err := ln.Accept(ctx)
@@ -243,7 +243,7 @@ func TestUnidirectionalStreams(t *testing.T) {
 
 	t.Run("server -> client", func(t *testing.T) {
 		ln, err := quic.Listen(
-			newUPDConnLocalhost(t),
+			newUDPConnLocalhost(t),
 			getTLSConfig(),
 			getQuicConfig(nil),
 		)
@@ -252,7 +252,7 @@ func TestUnidirectionalStreams(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		client, err := quic.Dial(ctx, newUPDConnLocalhost(t), ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+		client, err := quic.Dial(ctx, newUDPConnLocalhost(t), ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
 		require.NoError(t, err)
 
 		serverConn, err := ln.Accept(ctx)
@@ -273,7 +273,7 @@ func TestUnidirectionalStreams(t *testing.T) {
 
 	t.Run("client <-> server", func(t *testing.T) {
 		ln, err := quic.Listen(
-			newUPDConnLocalhost(t),
+			newUDPConnLocalhost(t),
 			getTLSConfig(),
 			getQuicConfig(nil),
 		)
@@ -295,7 +295,7 @@ func TestUnidirectionalStreams(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		client, err := quic.Dial(ctx, newUPDConnLocalhost(t), ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+		client, err := quic.Dial(ctx, newUDPConnLocalhost(t), ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
 		require.NoError(t, err)
 
 		errChan3 := make(chan error, 1)

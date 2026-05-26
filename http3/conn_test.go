@@ -3,448 +3,500 @@ package http3
 import (
 	"bytes"
 	"context"
-	"errors"
-	"fmt"
+	"io"
+	"testing"
 	"time"
 
-	quic "github.com/refraction-networking/uquic"
-	mockquic "github.com/refraction-networking/uquic/internal/mocks/quic"
-	"github.com/refraction-networking/uquic/internal/protocol"
-	"github.com/refraction-networking/uquic/internal/qerr"
+	"github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic/http3/qlog"
+	"github.com/refraction-networking/uquic/qlogwriter"
 	"github.com/refraction-networking/uquic/quicvarint"
+	"github.com/refraction-networking/uquic/testutils/events"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"go.uber.org/mock/gomock"
+	"github.com/stretchr/testify/require"
 )
 
-var _ = Describe("Connection", func() {
-	Context("control stream handling", func() {
-		It("parses the SETTINGS frame", func() {
-			qconn := mockquic.NewMockEarlyConnection(mockCtrl)
-			qconn.EXPECT().ReceiveDatagram(gomock.Any()).Return(nil, errors.New("no datagrams"))
-			conn := newConnection(
-				context.Background(),
-				qconn,
-				false,
-				protocol.PerspectiveServer,
-				nil,
-				0,
-			)
-			b := quicvarint.Append(nil, streamTypeControlStream)
-			b = (&settingsFrame{
-				Datagram:        true,
-				ExtendedConnect: true,
-				Other:           map[uint64]uint64{1337: 42},
-			}).Append(b)
-			r := bytes.NewReader(b)
-			controlStr := mockquic.NewMockStream(mockCtrl)
-			controlStr.EXPECT().Read(gomock.Any()).DoAndReturn(r.Read).AnyTimes()
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(controlStr, nil)
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(nil, errors.New("test done"))
-			done := make(chan struct{})
-			go func() {
-				defer GinkgoRecover()
-				defer close(done)
-				conn.handleUnidirectionalStreams(nil)
-			}()
-			Eventually(conn.ReceivedSettings()).Should(BeClosed())
-			Expect(conn.Settings().EnableDatagrams).To(BeTrue())
-			Expect(conn.Settings().EnableExtendedConnect).To(BeTrue())
-			Expect(conn.Settings().Other).To(HaveKeyWithValue(uint64(1337), uint64(42)))
-			Eventually(done).Should(BeClosed())
-		})
+func TestConnReceiveSettings(t *testing.T) {
+	var eventRecorder events.Recorder
+	clientConn, serverConn := newConnPair(t, withServerRecorder(&eventRecorder))
 
-		It("rejects duplicate control streams", func() {
-			qconn := mockquic.NewMockEarlyConnection(mockCtrl)
-			conn := newConnection(
-				context.Background(),
-				qconn,
-				false,
-				protocol.PerspectiveServer,
-				nil,
-				0,
-			)
-			b := quicvarint.Append(nil, streamTypeControlStream)
-			b = (&settingsFrame{}).Append(b)
-			r1 := bytes.NewReader(b)
-			controlStr1 := mockquic.NewMockStream(mockCtrl)
-			controlStr1.EXPECT().Read(gomock.Any()).DoAndReturn(r1.Read).AnyTimes()
-			r2 := bytes.NewReader(b)
-			controlStr2 := mockquic.NewMockStream(mockCtrl)
-			controlStr2.EXPECT().Read(gomock.Any()).DoAndReturn(r2.Read).AnyTimes()
-			done := make(chan struct{})
-			closed := make(chan struct{})
-			qconn.EXPECT().CloseWithError(qerr.ApplicationErrorCode(ErrCodeStreamCreationError), "duplicate control stream").Do(func(qerr.ApplicationErrorCode, string) error {
-				close(closed)
-				return nil
-			})
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(controlStr1, nil)
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(controlStr2, nil)
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(nil, errors.New("test done"))
-			go func() {
-				defer GinkgoRecover()
-				defer close(done)
-				conn.handleUnidirectionalStreams(nil)
-			}()
-			Eventually(closed).Should(BeClosed())
-			Eventually(done).Should(BeClosed())
-		})
+	conn := newRawConn(serverConn, false, nil, nil, &eventRecorder, nil)
+	b := quicvarint.Append(nil, streamTypeControlStream)
+	sf := &settingsFrame{
+		MaxFieldSectionSize: 1234,
+		Datagram:            true,
+		ExtendedConnect:     true,
+		Other:               map[uint64]uint64{1337: 42},
+	}
+	b = sf.Append(b)
+	controlStr, err := clientConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr.Write(b)
+	require.NoError(t, err)
 
-		for _, t := range []uint64{streamTypeQPACKEncoderStream, streamTypeQPACKDecoderStream} {
-			streamType := t
-			name := "encoder"
-			if streamType == streamTypeQPACKDecoderStream {
-				name = "decoder"
-			}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	serverStr, err := serverConn.AcceptUniStream(ctx)
+	require.NoError(t, err)
 
-			It(fmt.Sprintf("ignores the QPACK %s streams", name), func() {
-				qconn := mockquic.NewMockEarlyConnection(mockCtrl)
-				conn := newConnection(
-					context.Background(),
-					qconn,
-					false,
-					protocol.PerspectiveClient,
-					nil,
-					0,
-				)
-				buf := bytes.NewBuffer(quicvarint.Append(nil, streamType))
-				str := mockquic.NewMockStream(mockCtrl)
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(buf.Read).AnyTimes()
-				qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(str, nil)
-				testDone := make(chan struct{})
-				qconn.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
-					<-testDone
-					return nil, errors.New("test done")
-				})
-				time.Sleep(scaleDuration(20 * time.Millisecond)) // don't EXPECT any calls to str.CancelRead
-				close(testDone)
-				done := make(chan struct{})
-				go func() {
-					defer GinkgoRecover()
-					defer close(done)
-					conn.handleUnidirectionalStreams(nil)
-				}()
-				Eventually(done).Should(BeClosed())
-			})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn.handleUnidirectionalStream(serverStr, true)
+	}()
+	select {
+	case <-conn.ReceivedSettings():
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for settings")
+	}
+	settings := conn.Settings()
+	require.True(t, settings.EnableDatagrams)
+	require.True(t, settings.EnableExtendedConnect)
+	require.Equal(t, map[uint64]uint64{1337: 42}, settings.Other)
 
-			It(fmt.Sprintf("rejects duplicate QPACK %s streams", name), func() {
-				qconn := mockquic.NewMockEarlyConnection(mockCtrl)
-				conn := newConnection(
-					context.Background(),
-					qconn,
-					false,
-					protocol.PerspectiveClient,
-					nil,
-					0,
-				)
-				buf := bytes.NewBuffer(quicvarint.Append(nil, streamType))
-				str1 := mockquic.NewMockStream(mockCtrl)
-				str1.EXPECT().Read(gomock.Any()).DoAndReturn(buf.Read).AnyTimes()
-				buf2 := bytes.NewBuffer(quicvarint.Append(nil, streamType))
-				str2 := mockquic.NewMockStream(mockCtrl)
-				str2.EXPECT().Read(gomock.Any()).DoAndReturn(buf2.Read).AnyTimes()
-				qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(str1, nil)
-				qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(str2, nil)
-				testDone := make(chan struct{})
-				qconn.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
-					<-testDone
-					return nil, errors.New("test done")
-				})
-				qconn.EXPECT().CloseWithError(qerr.ApplicationErrorCode(ErrCodeStreamCreationError), gomock.Any()).Do(func(qerr.ApplicationErrorCode, string) error {
-					close(testDone)
-					return nil
-				})
-				done := make(chan struct{})
-				go func() {
-					defer GinkgoRecover()
-					defer close(done)
-					conn.handleUnidirectionalStreams(nil)
-				}()
-				Eventually(done).Should(BeClosed())
-			})
-		}
+	expectedLen, expectedPayloadLen := expectedFrameLength(t, sf)
+	require.Equal(t,
+		[]qlogwriter.Event{
+			qlog.FrameParsed{
+				StreamID: controlStr.StreamID(),
+				Raw:      qlog.RawInfo{Length: expectedLen, PayloadLength: expectedPayloadLen},
+				Frame: qlog.Frame{
+					Frame: qlog.SettingsFrame{
+						MaxFieldSectionSize: 1234,
+						Datagram:            pointer(true),
+						ExtendedConnect:     pointer(true),
+						Other:               map[uint64]uint64{1337: 42},
+					},
+				},
+			},
+		},
+		filterQlogEventsForFrame(eventRecorder.Events(qlog.FrameParsed{}), qlog.SettingsFrame{}),
+	)
+}
 
-		It("resets streams other than the control stream and the QPACK streams", func() {
-			qconn := mockquic.NewMockEarlyConnection(mockCtrl)
-			conn := newConnection(
-				context.Background(),
-				qconn,
-				false,
-				protocol.PerspectiveServer,
-				nil,
-				0,
-			)
-			buf := bytes.NewBuffer(quicvarint.Append(nil, 0x1337))
-			str := mockquic.NewMockStream(mockCtrl)
-			str.EXPECT().Read(gomock.Any()).DoAndReturn(buf.Read).AnyTimes()
-			reset := make(chan struct{})
-			str.EXPECT().CancelRead(quic.StreamErrorCode(ErrCodeStreamCreationError)).Do(func(quic.StreamErrorCode) { close(reset) })
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(str, nil)
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(nil, errors.New("test done"))
-			done := make(chan struct{})
-			go func() {
-				defer GinkgoRecover()
-				defer close(done)
-				conn.handleUnidirectionalStreams(nil)
-			}()
-			Eventually(done).Should(BeClosed())
-			Eventually(reset).Should(BeClosed())
-		})
-
-		It("errors when the first frame on the control stream is not a SETTINGS frame", func() {
-			qconn := mockquic.NewMockEarlyConnection(mockCtrl)
-			conn := newConnection(
-				context.Background(),
-				qconn,
-				false,
-				protocol.PerspectiveServer,
-				nil,
-				0,
-			)
-			b := quicvarint.Append(nil, streamTypeControlStream)
-			b = (&dataFrame{}).Append(b)
-			r := bytes.NewReader(b)
-			controlStr := mockquic.NewMockStream(mockCtrl)
-			controlStr.EXPECT().Read(gomock.Any()).DoAndReturn(r.Read).AnyTimes()
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(controlStr, nil)
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(nil, errors.New("test done"))
-			closed := make(chan struct{})
-			qconn.EXPECT().CloseWithError(quic.ApplicationErrorCode(ErrCodeMissingSettings), gomock.Any()).Do(func(quic.ApplicationErrorCode, string) error {
-				close(closed)
-				return nil
-			})
-			done := make(chan struct{})
-			go func() {
-				defer GinkgoRecover()
-				defer close(done)
-				conn.handleUnidirectionalStreams(nil)
-			}()
-			Eventually(done).Should(BeClosed())
-			Eventually(closed).Should(BeClosed())
-		})
-
-		It("errors when parsing the frame on the control stream fails", func() {
-			qconn := mockquic.NewMockEarlyConnection(mockCtrl)
-			conn := newConnection(
-				context.Background(),
-				qconn,
-				false,
-				protocol.PerspectiveServer,
-				nil,
-				0,
-			)
-			b := quicvarint.Append(nil, streamTypeControlStream)
-			b = (&settingsFrame{}).Append(b)
-			r := bytes.NewReader(b[:len(b)-1])
-			controlStr := mockquic.NewMockStream(mockCtrl)
-			controlStr.EXPECT().Read(gomock.Any()).DoAndReturn(r.Read).AnyTimes()
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(controlStr, nil)
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(nil, errors.New("test done"))
-			closed := make(chan struct{})
-			qconn.EXPECT().CloseWithError(quic.ApplicationErrorCode(ErrCodeFrameError), gomock.Any()).Do(func(code quic.ApplicationErrorCode, _ string) error {
-				close(closed)
-				return nil
-			})
-			done := make(chan struct{})
-			go func() {
-				defer GinkgoRecover()
-				defer close(done)
-				conn.handleUnidirectionalStreams(nil)
-			}()
-			Eventually(done).Should(BeClosed())
-			Eventually(closed).Should(BeClosed())
-		})
-
-		for _, pers := range []protocol.Perspective{protocol.PerspectiveServer, protocol.PerspectiveClient} {
-			expectedErr := ErrCodeIDError
-			if pers == protocol.PerspectiveClient {
-				expectedErr = ErrCodeStreamCreationError
-			}
-
-			It(fmt.Sprintf("errors when parsing the %s opens a push stream", pers), func() {
-				qconn := mockquic.NewMockEarlyConnection(mockCtrl)
-				conn := newConnection(
-					context.Background(),
-					qconn,
-					false,
-					pers.Opposite(),
-					nil,
-					0,
-				)
-				buf := bytes.NewBuffer(quicvarint.Append(nil, streamTypePushStream))
-				controlStr := mockquic.NewMockStream(mockCtrl)
-				controlStr.EXPECT().Read(gomock.Any()).DoAndReturn(buf.Read).AnyTimes()
-				qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(controlStr, nil)
-				qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(nil, errors.New("test done"))
-				closed := make(chan struct{})
-				qconn.EXPECT().CloseWithError(quic.ApplicationErrorCode(expectedErr), gomock.Any()).Do(func(quic.ApplicationErrorCode, string) error {
-					close(closed)
-					return nil
-				})
-				done := make(chan struct{})
-				go func() {
-					defer GinkgoRecover()
-					defer close(done)
-					conn.handleUnidirectionalStreams(nil)
-				}()
-				Eventually(done).Should(BeClosed())
-				Eventually(closed).Should(BeClosed())
-			})
-		}
-
-		It("errors when the server advertises datagram support (and we enabled support for it)", func() {
-			qconn := mockquic.NewMockEarlyConnection(mockCtrl)
-			conn := newConnection(
-				context.Background(),
-				qconn,
-				true,
-				protocol.PerspectiveClient,
-				nil,
-				0,
-			)
-			b := quicvarint.Append(nil, streamTypeControlStream)
-			b = (&settingsFrame{Datagram: true}).Append(b)
-			r := bytes.NewReader(b)
-			controlStr := mockquic.NewMockStream(mockCtrl)
-			controlStr.EXPECT().Read(gomock.Any()).DoAndReturn(r.Read).AnyTimes()
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(controlStr, nil)
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(nil, errors.New("test done"))
-			qconn.EXPECT().ConnectionState().Return(quic.ConnectionState{SupportsDatagrams: false})
-			closed := make(chan struct{})
-			qconn.EXPECT().CloseWithError(quic.ApplicationErrorCode(ErrCodeSettingsError), "missing QUIC Datagram support").Do(func(quic.ApplicationErrorCode, string) error {
-				close(closed)
-				return nil
-			})
-			done := make(chan struct{})
-			go func() {
-				defer GinkgoRecover()
-				defer close(done)
-				conn.handleUnidirectionalStreams(nil)
-			}()
-			Eventually(done).Should(BeClosed())
-			Eventually(closed).Should(BeClosed())
-		})
+func TestConnRejectDuplicateStreams(t *testing.T) {
+	t.Run("control stream", func(t *testing.T) {
+		testConnRejectDuplicateStreams(t, streamTypeControlStream)
 	})
+	t.Run("encoder stream", func(t *testing.T) {
+		testConnRejectDuplicateStreams(t, streamTypeQPACKEncoderStream)
+	})
+	t.Run("decoder stream", func(t *testing.T) {
+		testConnRejectDuplicateStreams(t, streamTypeQPACKDecoderStream)
+	})
+}
 
-	Context("datagram handling", func() {
-		var (
-			qconn *mockquic.MockEarlyConnection
-			conn  *connection
+func testConnRejectDuplicateStreams(t *testing.T, typ uint64) {
+	clientConn, serverConn := newConnPair(t)
+
+	conn := newRawConn(serverConn, false, nil, nil, nil, nil)
+	b := quicvarint.Append(nil, typ)
+	if typ == streamTypeControlStream {
+		b = (&settingsFrame{}).Append(b)
+	}
+	controlStr1, err := clientConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr1.Write(b)
+	require.NoError(t, err)
+	controlStr2, err := clientConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr2.Write(b)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	serverStr1, err := serverConn.AcceptUniStream(ctx)
+	require.NoError(t, err)
+	serverStr2, err := serverConn.AcceptUniStream(ctx)
+	require.NoError(t, err)
+
+	done := make(chan struct{}, 2)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		conn.handleUnidirectionalStream(serverStr1, true)
+	}()
+	go func() {
+		defer func() { done <- struct{}{} }()
+		conn.handleUnidirectionalStream(serverStr2, true)
+	}()
+	select {
+	case <-clientConn.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(clientConn.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeStreamCreationError)},
 		)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for duplicate stream")
+	}
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("timeout")
+		}
+	}
+}
 
-		BeforeEach(func() {
-			qconn = mockquic.NewMockEarlyConnection(mockCtrl)
-			conn = newConnection(
-				context.Background(),
-				qconn,
-				true,
-				protocol.PerspectiveClient,
-				nil,
-				0,
-			)
-			b := quicvarint.Append(nil, streamTypeControlStream)
-			b = (&settingsFrame{Datagram: true}).Append(b)
-			r := bytes.NewReader(b)
-			controlStr := mockquic.NewMockStream(mockCtrl)
-			controlStr.EXPECT().Read(gomock.Any()).DoAndReturn(r.Read).AnyTimes()
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(controlStr, nil).MaxTimes(1)
-			qconn.EXPECT().AcceptUniStream(gomock.Any()).Return(nil, errors.New("test done")).MaxTimes(1)
-			qconn.EXPECT().ConnectionState().Return(quic.ConnectionState{SupportsDatagrams: true}).MaxTimes(1)
-		})
+func TestConnResetUnknownUniStream(t *testing.T) {
+	clientConn, serverConn := newConnPair(t)
 
-		It("closes the connection if it can't parse the quarter stream ID", func() {
-			qconn.EXPECT().ReceiveDatagram(gomock.Any()).Return([]byte{128}, nil) // return an invalid varint
-			done := make(chan struct{})
-			qconn.EXPECT().CloseWithError(qerr.ApplicationErrorCode(ErrCodeDatagramError), gomock.Any()).Do(func(qerr.ApplicationErrorCode, string) error {
-				close(done)
-				return nil
-			})
-			go func() {
-				defer GinkgoRecover()
-				conn.handleUnidirectionalStreams(nil)
-			}()
-			Eventually(done).Should(BeClosed())
-		})
+	conn := newRawConn(serverConn, false, nil, nil, nil, nil)
+	buf := bytes.NewBuffer(quicvarint.Append(nil, 0x1337))
+	str, err := clientConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = str.Write(buf.Bytes())
+	require.NoError(t, err)
 
-		It("closes the connection if the quarter stream ID is invalid", func() {
-			b := quicvarint.Append([]byte{}, maxQuarterStreamID+1)
-			qconn.EXPECT().ReceiveDatagram(gomock.Any()).Return(b, nil)
-			done := make(chan struct{})
-			qconn.EXPECT().CloseWithError(qerr.ApplicationErrorCode(ErrCodeDatagramError), gomock.Any()).Do(func(qerr.ApplicationErrorCode, string) error {
-				close(done)
-				return nil
-			})
-			go func() {
-				defer GinkgoRecover()
-				conn.handleUnidirectionalStreams(nil)
-			}()
-			Eventually(done).Should(BeClosed())
-		})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	serverStr, err := serverConn.AcceptUniStream(ctx)
+	require.NoError(t, err)
 
-		It("drops datagrams for non-existent streams", func() {
-			const strID = 4
-			// first deliver the datagram...
-			b := quicvarint.Append([]byte{}, strID/4)
-			b = append(b, []byte("foobar")...)
-			delivered := make(chan struct{})
-			qconn.EXPECT().ReceiveDatagram(gomock.Any()).DoAndReturn(func(context.Context) ([]byte, error) {
-				close(delivered)
-				return b, nil
-			})
-			go func() {
-				defer GinkgoRecover()
-				conn.handleUnidirectionalStreams(nil)
-			}()
-			Eventually(delivered).Should(BeClosed())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn.handleUnidirectionalStream(serverStr, true)
+	}()
+	expectStreamWriteReset(t, str, quic.StreamErrorCode(ErrCodeStreamCreationError))
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+}
 
-			// ... then open the stream
-			qstr := mockquic.NewMockStream(mockCtrl)
-			qstr.EXPECT().StreamID().Return(strID).MinTimes(1)
-			qstr.EXPECT().Context().Return(context.Background()).AnyTimes()
-			qconn.EXPECT().OpenStreamSync(gomock.Any()).Return(qstr, nil)
-			str, err := conn.openRequestStream(context.Background(), nil, nil, true, 1000)
-			Expect(err).ToNot(HaveOccurred())
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			_, err = str.ReceiveDatagram(ctx)
-			Expect(err).To(MatchError(context.Canceled))
-		})
-
-		It("delivers datagrams for existing streams", func() {
-			const strID = 4
-
-			// first open the stream...
-			qstr := mockquic.NewMockStream(mockCtrl)
-			qstr.EXPECT().StreamID().Return(strID).MinTimes(1)
-			qstr.EXPECT().Context().Return(context.Background()).AnyTimes()
-			qconn.EXPECT().OpenStreamSync(gomock.Any()).Return(qstr, nil)
-			str, err := conn.openRequestStream(context.Background(), nil, nil, true, 1000)
-			Expect(err).ToNot(HaveOccurred())
-
-			// ... then deliver the datagram
-			b := quicvarint.Append([]byte{}, strID/4)
-			b = append(b, []byte("foobar")...)
-			qconn.EXPECT().ReceiveDatagram(gomock.Any()).Return(b, nil)
-			qconn.EXPECT().ReceiveDatagram(gomock.Any()).Return(nil, errors.New("test done"))
-			go func() {
-				defer GinkgoRecover()
-				conn.handleUnidirectionalStreams(nil)
-			}()
-
-			data, err := str.ReceiveDatagram(context.Background())
-			Expect(err).ToNot(HaveOccurred())
-			Expect(data).To(Equal([]byte("foobar")))
-		})
-
-		It("sends datagrams", func() {
-			const strID = 404
-			expected := quicvarint.Append([]byte{}, strID/4)
-			expected = append(expected, []byte("foobar")...)
-			testErr := errors.New("test error")
-			qconn.EXPECT().SendDatagram(expected).Return(testErr)
-
-			Expect(conn.sendDatagram(strID, []byte("foobar"))).To(MatchError(testErr))
-		})
+func TestConnControlStreamFailures(t *testing.T) {
+	t.Run("missing SETTINGS", func(t *testing.T) {
+		testConnControlStreamFailures(t, (&dataFrame{}).Append(nil), nil, ErrCodeMissingSettings)
 	})
-})
+	t.Run("frame error", func(t *testing.T) {
+		testConnControlStreamFailures(t,
+			// 1337 is invalid value for the Extended CONNECT setting
+			(&settingsFrame{Other: map[uint64]uint64{settingExtendedConnect: 1337}}).Append(nil),
+			nil,
+			ErrCodeFrameError,
+		)
+	})
+	t.Run("control stream closed before SETTINGS", func(t *testing.T) {
+		testConnControlStreamFailures(t, nil, io.EOF, ErrCodeClosedCriticalStream)
+	})
+	t.Run("control stream reset before SETTINGS", func(t *testing.T) {
+		testConnControlStreamFailures(t,
+			nil,
+			&quic.StreamError{Remote: true, ErrorCode: 42},
+			ErrCodeClosedCriticalStream,
+		)
+	})
+}
+
+func testConnControlStreamFailures(t *testing.T, data []byte, readErr error, expectedErr ErrCode) {
+	clientConn, serverConn := newConnPair(t)
+
+	conn := newRawConn(clientConn, false, nil, nil, nil, nil)
+	controlStr, err := serverConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr.Write(quicvarint.Append(nil, streamTypeControlStream))
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	clientStr, err := clientConn.AcceptUniStream(ctx)
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn.handleUnidirectionalStream(clientStr, false)
+	}()
+
+	switch readErr {
+	case nil:
+		_, err = controlStr.Write(data)
+		require.NoError(t, err)
+	case io.EOF:
+		_, err = controlStr.Write(data)
+		require.NoError(t, err)
+		require.NoError(t, controlStr.Close())
+	default:
+		// make sure the stream type is received
+		time.Sleep(scaleDuration(10 * time.Millisecond))
+		controlStr.CancelWrite(1337)
+	}
+
+	select {
+	case <-serverConn.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(serverConn.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(expectedErr)},
+		)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for close")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+}
+
+func TestConnControlStreamHandler(t *testing.T) {
+	t.Run("with handler", func(t *testing.T) { testConnControlStreamHandler(t, true) })
+	t.Run("without handler", func(t *testing.T) { testConnControlStreamHandler(t, false) })
+}
+
+func testConnControlStreamHandler(t *testing.T, useHandler bool) {
+	localConn, peerConn := newConnPair(t)
+
+	handlerCalled := make(chan struct{})
+	var controlStrHandler func(*quic.ReceiveStream, *frameParser)
+	if useHandler {
+		controlStrHandler = func(*quic.ReceiveStream, *frameParser) { close(handlerCalled) }
+	}
+	conn := newRawConn(localConn, false, nil, controlStrHandler, nil, nil)
+
+	b := quicvarint.Append(nil, streamTypeControlStream)
+	b = (&settingsFrame{}).Append(b)
+	str, err := peerConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = str.Write(b)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	localStr, err := localConn.AcceptUniStream(ctx)
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn.handleUnidirectionalStream(localStr, false)
+	}()
+
+	select {
+	case <-conn.ReceivedSettings():
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for settings")
+	}
+	if useHandler {
+		select {
+		case <-handlerCalled:
+		case <-time.After(time.Second):
+			t.Fatal("timeout waiting for handler to be called")
+		}
+	} else {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("timeout waiting for handler to return")
+		}
+	}
+}
+
+func TestConnRejectPushStream(t *testing.T) {
+	t.Run("client", func(t *testing.T) {
+		testConnRejectPushStream(t, false, ErrCodeIDError)
+	})
+	t.Run("server", func(t *testing.T) {
+		testConnRejectPushStream(t, true, ErrCodeStreamCreationError)
+	})
+}
+
+func testConnRejectPushStream(t *testing.T, isServer bool, expectedErr ErrCode) {
+	localConn, peerConn := newConnPair(t)
+
+	conn := newRawConn(localConn, false, nil, nil, nil, nil)
+	buf := bytes.NewBuffer(quicvarint.Append(nil, streamTypePushStream))
+	str, err := peerConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = str.Write(buf.Bytes())
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	localStr, err := localConn.AcceptUniStream(ctx)
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn.handleUnidirectionalStream(localStr, isServer)
+	}()
+	select {
+	case <-peerConn.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(peerConn.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(expectedErr)},
+		)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for close")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+}
+
+func TestConnInconsistentDatagramSupport(t *testing.T) {
+	clientConn, serverConn := newConnPair(t)
+
+	conn := newRawConn(clientConn, true, nil, nil, nil, nil)
+	b := quicvarint.Append(nil, streamTypeControlStream)
+	b = (&settingsFrame{Datagram: true}).Append(b)
+	controlStr, err := serverConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr.Write(b)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	clientStr, err := clientConn.AcceptUniStream(ctx)
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn.handleUnidirectionalStream(clientStr, false)
+	}()
+
+	select {
+	case <-serverConn.Context().Done():
+		err := context.Cause(serverConn.Context())
+		require.ErrorIs(t, err, &quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeSettingsError)})
+		require.ErrorContains(t, err, "missing QUIC Datagram support")
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for close")
+	}
+}
+
+func TestConnSendAndReceiveDatagram(t *testing.T) {
+	var eventRecorder events.Recorder
+	clientConn, serverConn := newConnPair(t, withDatagrams(), withClientRecorder(&eventRecorder))
+
+	conn := newRawConn(clientConn, true, nil, nil, &eventRecorder, nil)
+	b := quicvarint.Append(nil, streamTypeControlStream)
+	b = (&settingsFrame{Datagram: true}).Append(b)
+	controlStr, err := serverConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr.Write(b)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	clientStr, err := clientConn.AcceptUniStream(ctx)
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn.handleUnidirectionalStream(clientStr, false)
+	}()
+
+	const strID = 4
+
+	// first deliver a datagram...
+	// since the stream is not open yet, it will be dropped
+	quarterStreamID := quicvarint.Append([]byte{}, strID/4)
+
+	datagram := append(quarterStreamID, []byte("foo")...)
+	require.NoError(t, serverConn.SendDatagram(datagram))
+	time.Sleep(scaleDuration(10 * time.Millisecond)) // give the datagram a chance to be delivered
+
+	require.Equal(t,
+		[]qlogwriter.Event{
+			qlog.DatagramParsed{
+				QuaterStreamID: strID / 4,
+				Raw:            qlog.RawInfo{Length: len(datagram), PayloadLength: 3},
+			},
+		},
+		eventRecorder.Events(qlog.DatagramParsed{}),
+	)
+	eventRecorder.Clear()
+
+	// don't use stream 0, since that makes it hard to test that the quarter stream ID is used
+	str0, err := clientConn.OpenStreamSync(context.Background())
+	require.NoError(t, err)
+	str0.Close()
+
+	str, err := clientConn.OpenStream()
+	require.NoError(t, err)
+	require.Equal(t, quic.StreamID(strID), str.StreamID())
+	datagramStr := conn.TrackStream(str)
+
+	// now open the stream...
+	require.NoError(t, serverConn.SendDatagram(append(quarterStreamID, []byte("bar")...)))
+
+	data, err := datagramStr.ReceiveDatagram(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []byte("bar"), data)
+
+	// now send a datagram
+	require.NoError(t, datagramStr.SendDatagram([]byte("foobaz")))
+
+	expected := quicvarint.Append([]byte{}, strID/4)
+	expected = append(expected, []byte("foobaz")...)
+
+	require.Equal(t,
+		[]qlogwriter.Event{
+			qlog.DatagramCreated{
+				QuaterStreamID: strID / 4,
+				Raw:            qlog.RawInfo{PayloadLength: 6, Length: len(expected)},
+			},
+		},
+		eventRecorder.Events(qlog.DatagramCreated{}),
+	)
+	eventRecorder.Clear()
+
+	data, err = serverConn.ReceiveDatagram(ctx)
+	require.NoError(t, err)
+	require.Equal(t, expected, data)
+}
+
+func TestConnDatagramFailures(t *testing.T) {
+	t.Run("invalid varint", func(t *testing.T) {
+		testConnDatagramFailures(t, []byte{128})
+	})
+
+	t.Run("invalid quarter stream ID", func(t *testing.T) {
+		testConnDatagramFailures(t, quicvarint.Append([]byte{}, maxQuarterStreamID+1))
+	})
+}
+
+func testConnDatagramFailures(t *testing.T, datagram []byte) {
+	localConn, peerConn := newConnPair(t, withDatagrams())
+
+	conn := newRawConn(localConn, true, nil, nil, nil, nil)
+
+	b := quicvarint.Append(nil, streamTypeControlStream)
+	b = (&settingsFrame{Datagram: true}).Append(b)
+	controlStr, err := peerConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr.Write(b)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	localStr, err := localConn.AcceptUniStream(ctx)
+	require.NoError(t, err)
+
+	go conn.handleUnidirectionalStream(localStr, false)
+
+	// Wait for SETTINGS to be received and datagram handling to start
+	select {
+	case <-conn.ReceivedSettings():
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for settings")
+	}
+
+	require.NoError(t, peerConn.SendDatagram(datagram))
+
+	select {
+	case <-peerConn.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(peerConn.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeDatagramError)},
+		)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for close")
+	}
+}

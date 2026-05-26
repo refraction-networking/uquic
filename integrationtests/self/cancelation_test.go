@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,7 +21,7 @@ import (
 
 func TestStreamReadCancellation(t *testing.T) {
 	t.Run("immediate", func(t *testing.T) {
-		testStreamCancellation(t, func(str quic.ReceiveStream) error {
+		testStreamCancellation(t, func(str *quic.ReceiveStream) error {
 			str.CancelRead(quic.StreamErrorCode(str.StreamID()))
 			_, err := str.Read([]byte{0})
 			return err
@@ -29,8 +29,8 @@ func TestStreamReadCancellation(t *testing.T) {
 	})
 
 	t.Run("after reading some data", func(t *testing.T) {
-		testStreamCancellation(t, func(str quic.ReceiveStream) error {
-			length := int(rand.Int31n(int32(len(PRData) - 1)))
+		testStreamCancellation(t, func(str *quic.ReceiveStream) error {
+			length := rand.IntN(len(PRData) - 1)
 			if _, err := io.ReadAll(io.LimitReader(str, int64(length))); err != nil {
 				return fmt.Errorf("reading stream data failed: %w", err)
 			}
@@ -43,7 +43,7 @@ func TestStreamReadCancellation(t *testing.T) {
 	// This test is especially valuable when run with race detector,
 	// see https://github.com/quic-go/quic-go/issues/3239.
 	t.Run("concurrent", func(t *testing.T) {
-		testStreamCancellation(t, func(str quic.ReceiveStream) error {
+		testStreamCancellation(t, func(str *quic.ReceiveStream) error {
 			errChan := make(chan error, 1)
 			go func() {
 				for {
@@ -79,7 +79,7 @@ func TestStreamReadCancellation(t *testing.T) {
 
 func TestStreamWriteCancellation(t *testing.T) {
 	t.Run("immediate", func(t *testing.T) {
-		testStreamCancellation(t, nil, func(str quic.SendStream) error {
+		testStreamCancellation(t, nil, func(str *quic.SendStream) error {
 			str.CancelWrite(quic.StreamErrorCode(str.StreamID()))
 			_, err := str.Write([]byte{0})
 			return err
@@ -87,8 +87,8 @@ func TestStreamWriteCancellation(t *testing.T) {
 	})
 
 	t.Run("after writing some data", func(t *testing.T) {
-		testStreamCancellation(t, nil, func(str quic.SendStream) error {
-			length := int(rand.Int31n(int32(len(PRData) - 1)))
+		testStreamCancellation(t, nil, func(str *quic.SendStream) error {
+			length := rand.IntN(len(PRData) - 1)
 			if _, err := str.Write(PRData[:length]); err != nil {
 				return fmt.Errorf("writing stream data failed: %w", err)
 			}
@@ -101,7 +101,7 @@ func TestStreamWriteCancellation(t *testing.T) {
 	// This test is especially valuable when run with race detector,
 	// see https://github.com/quic-go/quic-go/issues/3239.
 	t.Run("concurrent", func(t *testing.T) {
-		testStreamCancellation(t, nil, func(str quic.SendStream) error {
+		testStreamCancellation(t, nil, func(str *quic.SendStream) error {
 			errChan := make(chan error, 1)
 			go func() {
 				var offset int
@@ -141,12 +141,12 @@ func TestStreamWriteCancellation(t *testing.T) {
 func TestStreamReadWriteCancellation(t *testing.T) {
 	t.Run("immediate", func(t *testing.T) {
 		testStreamCancellation(t,
-			func(str quic.ReceiveStream) error {
+			func(str *quic.ReceiveStream) error {
 				str.CancelRead(quic.StreamErrorCode(str.StreamID()))
 				_, err := str.Read([]byte{0})
 				return err
 			},
-			func(str quic.SendStream) error {
+			func(str *quic.SendStream) error {
 				str.CancelWrite(quic.StreamErrorCode(str.StreamID()))
 				_, err := str.Write([]byte{0})
 				return err
@@ -156,8 +156,8 @@ func TestStreamReadWriteCancellation(t *testing.T) {
 
 	t.Run("after writing some data", func(t *testing.T) {
 		testStreamCancellation(t,
-			func(str quic.ReceiveStream) error {
-				length := int(rand.Int31n(int32(len(PRData) - 1)))
+			func(str *quic.ReceiveStream) error {
+				length := rand.IntN(len(PRData) - 1)
 				if _, err := io.ReadAll(io.LimitReader(str, int64(length))); err != nil {
 					return fmt.Errorf("reading stream data failed: %w", err)
 				}
@@ -165,8 +165,8 @@ func TestStreamReadWriteCancellation(t *testing.T) {
 				_, err := str.Read([]byte{0})
 				return err
 			},
-			func(str quic.SendStream) error {
-				length := int(rand.Int31n(int32(len(PRData) - 1)))
+			func(str *quic.SendStream) error {
+				length := rand.IntN(len(PRData) - 1)
 				if _, err := str.Write(PRData[:length]); err != nil {
 					return fmt.Errorf("writing stream data failed: %w", err)
 				}
@@ -182,12 +182,12 @@ func TestStreamReadWriteCancellation(t *testing.T) {
 // If writeFunc is set, the write side is canceled for 50% of the streams.
 func testStreamCancellation(
 	t *testing.T,
-	readFunc func(str quic.ReceiveStream) error,
-	writeFunc func(str quic.SendStream) error,
+	readFunc func(str *quic.ReceiveStream) error,
+	writeFunc func(str *quic.SendStream) error,
 ) {
 	const numStreams = 80
 
-	server, err := quic.Listen(newUPDConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
+	server, err := quic.Listen(newUDPConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 	defer server.Close()
 
@@ -195,7 +195,7 @@ func testStreamCancellation(
 	defer cancel()
 	conn, err := quic.Dial(
 		ctx,
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		server.Addr(),
 		getTLSClientConfig(),
 		getQuicConfig(&quic.Config{MaxIncomingUniStreams: numStreams / 2}),
@@ -214,7 +214,7 @@ func testStreamCancellation(
 	var numCancellations int
 	actions := make([]bool, numStreams)
 	for i := range actions {
-		actions[i] = rand.Intn(2) == 0
+		actions[i] = rand.IntN(2) == 0
 		if actions[i] {
 			numCancellations++
 		}
@@ -253,7 +253,7 @@ func testStreamCancellation(
 	for _, doCancel := range actions {
 		str, err := conn.AcceptUniStream(ctx)
 		require.NoError(t, err)
-		go func(str quic.ReceiveStream) {
+		go func(str *quic.ReceiveStream) {
 			if readFunc != nil && doCancel {
 				if err := readFunc(str); err != nil {
 					clientErrChan <- &cancellationErr{StreamID: str.StreamID(), Err: err}
@@ -325,7 +325,7 @@ func testStreamCancellation(
 func TestCancelAcceptStream(t *testing.T) {
 	const numStreams = 30
 
-	server, err := quic.Listen(newUPDConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
+	server, err := quic.Listen(newUDPConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 	defer server.Close()
 
@@ -333,7 +333,7 @@ func TestCancelAcceptStream(t *testing.T) {
 	defer cancel()
 	conn, err := quic.Dial(
 		ctx,
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		server.Addr(),
 		getTLSClientConfig(),
 		getQuicConfig(&quic.Config{MaxIncomingUniStreams: numStreams / 3}),
@@ -374,7 +374,7 @@ func TestCancelAcceptStream(t *testing.T) {
 	for numToAccept < numStreams {
 		ctx, cancel := context.WithCancel(context.Background())
 		// cancel accepting half of the streams
-		if rand.Int31()%2 == 0 {
+		if rand.Int()%2 == 0 {
 			cancel()
 		} else {
 			numToAccept++
@@ -419,13 +419,13 @@ func TestCancelOpenStreamSync(t *testing.T) {
 		maxIncomingStreams = 4
 	)
 
-	server, err := quic.Listen(newUPDConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
+	server, err := quic.Listen(newUDPConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 	defer server.Close()
 
 	conn, err := quic.Dial(
 		context.Background(),
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		server.Addr(),
 		getTLSClientConfig(),
 		getQuicConfig(&quic.Config{MaxIncomingUniStreams: maxIncomingStreams}),
@@ -457,7 +457,7 @@ func TestCancelOpenStreamSync(t *testing.T) {
 				continue
 			}
 			numOpened++
-			go func(str quic.SendStream) {
+			go func(str *quic.SendStream) {
 				defer str.Close()
 				if _, err := str.Write(PRData); err != nil {
 					serverErrChan <- err
@@ -467,11 +467,11 @@ func TestCancelOpenStreamSync(t *testing.T) {
 	}()
 
 	clientErrChan := make(chan error, numStreams)
-	for i := 0; i < numStreams; i++ {
+	for range numStreams {
 		<-msg
 		str, err := conn.AcceptUniStream(context.Background())
 		require.NoError(t, err)
-		go func(str quic.ReceiveStream) {
+		go func(str *quic.ReceiveStream) {
 			data, err := io.ReadAll(str)
 			if err != nil {
 				clientErrChan <- err
@@ -508,7 +508,7 @@ func TestHeavyStreamCancellation(t *testing.T) {
 	const maxIncomingStreams = 500
 
 	server, err := quic.Listen(
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		getTLSConfig(),
 		getQuicConfig(&quic.Config{MaxIncomingStreams: maxIncomingStreams, MaxIdleTimeout: 10 * time.Second}),
 	)
@@ -520,25 +520,25 @@ func TestHeavyStreamCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	conn, err := quic.Dial(ctx, newUPDConnLocalhost(t), server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+	conn, err := quic.Dial(ctx, newUDPConnLocalhost(t), server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 
 	serverConn, err := server.Accept(context.Background())
 	require.NoError(t, err)
 
-	handleStream := func(str quic.Stream) {
+	handleStream := func(str *quic.Stream) {
 		str.SetDeadline(time.Now().Add(time.Second))
 		go func() {
 			defer wg.Done()
-			if rand.Int31()%2 == 0 {
+			if rand.Int()%2 == 0 {
 				io.ReadAll(str)
 			}
 		}()
 		go func() {
 			defer wg.Done()
-			if rand.Int31()%2 == 0 {
+			if rand.Int()%2 == 0 {
 				str.Write([]byte("foobar"))
-				if rand.Int31()%2 == 0 {
+				if rand.Int()%2 == 0 {
 					str.Close()
 				}
 			}
@@ -547,13 +547,13 @@ func TestHeavyStreamCancellation(t *testing.T) {
 			defer wg.Done()
 			// Make sure we at least send out *something* for the last stream,
 			// otherwise the peer might never receive this anything for this stream.
-			if rand.Int31()%2 == 0 || str.StreamID() == 4*(maxIncomingStreams-1) {
+			if rand.Int()%2 == 0 || str.StreamID() == 4*(maxIncomingStreams-1) {
 				str.CancelWrite(1234)
 			}
 		}()
 		go func() {
 			defer wg.Done()
-			if rand.Int31()%2 == 0 {
+			if rand.Int()%2 == 0 {
 				str.CancelRead(1234)
 			}
 		}()

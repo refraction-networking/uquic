@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"crypto/x509"
 	"flag"
 	"io"
@@ -10,12 +11,10 @@ import (
 	"os"
 	"sync"
 
-	tls "github.com/refraction-networking/utls"
-
-	quic "github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic"
 	"github.com/refraction-networking/uquic/http3"
+	"github.com/refraction-networking/uquic/http3/qlog"
 	"github.com/refraction-networking/uquic/internal/testdata"
-	"github.com/refraction-networking/uquic/qlog"
 )
 
 func main() {

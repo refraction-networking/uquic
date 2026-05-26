@@ -6,61 +6,54 @@ import (
 	"testing"
 	"time"
 
-	quic "github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic"
 	"github.com/refraction-networking/uquic/internal/handshake"
 	"github.com/refraction-networking/uquic/internal/protocol"
-	"github.com/refraction-networking/uquic/logging"
+	"github.com/refraction-networking/uquic/qlog"
+	"github.com/refraction-networking/uquic/qlogwriter"
+	"github.com/refraction-networking/uquic/testutils/events"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestKeyUpdates(t *testing.T) {
-	origKeyUpdateInterval := handshake.KeyUpdateInterval
-	t.Cleanup(func() { handshake.KeyUpdateInterval = origKeyUpdateInterval })
-	handshake.KeyUpdateInterval = 1 // update keys as frequently as possible
+	reset := handshake.SetKeyUpdateInterval(1) // update keys as frequently as possible
+	t.Cleanup(reset)
 
-	var sentHeaders []*logging.ShortHeader
-	var receivedHeaders []*logging.ShortHeader
-
-	countKeyPhases := func() (sent, received int) {
-		lastKeyPhase := protocol.KeyPhaseOne
-		for _, hdr := range sentHeaders {
-			if hdr.KeyPhase != lastKeyPhase {
-				sent++
-				lastKeyPhase = hdr.KeyPhase
-			}
-		}
-		lastKeyPhase = protocol.KeyPhaseOne
-		for _, hdr := range receivedHeaders {
-			if hdr.KeyPhase != lastKeyPhase {
-				received++
-				lastKeyPhase = hdr.KeyPhase
+	countKeyPhases := func(events []qlogwriter.Event) (sent, received int) {
+		lastKeyPhaseSend := protocol.KeyPhaseOne
+		lastKeyPhaseReceive := protocol.KeyPhaseOne
+		for _, ev := range events {
+			switch ev := ev.(type) {
+			case qlog.PacketSent:
+				if ev.Header.KeyPhaseBit != lastKeyPhaseSend {
+					sent++
+					lastKeyPhaseSend = ev.Header.KeyPhaseBit
+				}
+			case qlog.PacketReceived:
+				if ev.Header.KeyPhaseBit != lastKeyPhaseReceive {
+					received++
+					lastKeyPhaseReceive = ev.Header.KeyPhaseBit
+				}
 			}
 		}
 		return
 	}
 
-	server, err := quic.Listen(newUPDConnLocalhost(t), getTLSConfig(), nil)
+	server, err := quic.Listen(newUDPConnLocalhost(t), getTLSConfig(), nil)
 	require.NoError(t, err)
 	defer server.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
+	var eventRecorder events.Recorder
 	conn, err := quic.Dial(
 		ctx,
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		server.Addr(),
 		getTLSClientConfig(),
-		getQuicConfig(&quic.Config{Tracer: func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer {
-			return &logging.ConnectionTracer{
-				SentShortHeaderPacket: func(hdr *logging.ShortHeader, _ logging.ByteCount, _ logging.ECN, _ *logging.AckFrame, _ []logging.Frame) {
-					sentHeaders = append(sentHeaders, hdr)
-				},
-				ReceivedShortHeaderPacket: func(hdr *logging.ShortHeader, _ logging.ByteCount, _ logging.ECN, _ []logging.Frame) {
-					receivedHeaders = append(receivedHeaders, hdr)
-				},
-			}
-		}}),
+		getQuicConfig(&quic.Config{Tracer: newTracer(&eventRecorder)}),
 	)
 	require.NoError(t, err)
 	defer conn.CloseWithError(0, "")
@@ -93,8 +86,8 @@ func TestKeyUpdates(t *testing.T) {
 
 	require.NoError(t, <-serverErrChan)
 
-	keyPhasesSent, keyPhasesReceived := countKeyPhases()
+	keyPhasesSent, keyPhasesReceived := countKeyPhases(eventRecorder.Events())
 	t.Logf("Used %d key phases on outgoing and %d key phases on incoming packets.", keyPhasesSent, keyPhasesReceived)
-	require.Greater(t, keyPhasesReceived, 10)
-	require.InDelta(t, keyPhasesSent, keyPhasesReceived, 2)
+	assert.Greater(t, keyPhasesReceived, 10)
+	assert.InDelta(t, keyPhasesSent, keyPhasesReceived, 2)
 }

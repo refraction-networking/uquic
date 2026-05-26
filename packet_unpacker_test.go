@@ -3,10 +3,10 @@ package quic
 import (
 	"crypto/rand"
 	"testing"
-	"time"
 
 	"github.com/refraction-networking/uquic/internal/handshake"
 	"github.com/refraction-networking/uquic/internal/mocks"
+	"github.com/refraction-networking/uquic/internal/monotime"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/qerr"
 	"github.com/refraction-networking/uquic/internal/wire"
@@ -211,7 +211,7 @@ func testUnpackShortHeaderPacket(t *testing.T, incorrectReservedBits bool, decry
 	opener.EXPECT().Open(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
 		decryptResult.decrypted, decryptResult.err,
 	)
-	pn, pnLen, kp, data, err := unpacker.UnpackShortHeader(time.Now(), append(hdrRaw, payload...))
+	pn, pnLen, kp, data, err := unpacker.UnpackShortHeader(monotime.Now(), append(hdrRaw, payload...))
 	if expectedErr != nil {
 		require.ErrorIs(t, err, expectedErr)
 		return
@@ -249,7 +249,7 @@ func TestUnpackHeaderSampleLongHeader(t *testing.T) {
 		cs.EXPECT().GetHandshakeOpener().Return(mocks.NewMockLongHeaderOpener(mockCtrl), nil)
 		_, err = unpacker.UnpackLongHeader(hdr, data[:len(data)-1])
 		require.IsType(t, &headerParseError{}, err)
-		require.ErrorContains(t, err, "Packet too small. Expected at least 20 bytes after the header, got 19")
+		require.ErrorContains(t, err, "packet too small, expected at least 20 bytes after the header, got 19")
 	})
 
 	t.Run("minimal size", func(t *testing.T) {
@@ -282,7 +282,7 @@ func TestUnpackHeaderSampleShortHeader(t *testing.T) {
 
 	t.Run("too short", func(t *testing.T) {
 		cs.EXPECT().Get1RTTOpener().Return(mocks.NewMockShortHeaderOpener(mockCtrl), nil)
-		_, _, _, _, err = unpacker.UnpackShortHeader(time.Now(), data[:len(data)-1])
+		_, _, _, _, err = unpacker.UnpackShortHeader(monotime.Now(), data[:len(data)-1])
 		require.IsType(t, &headerParseError{}, err)
 		require.ErrorContains(t, err, "packet too small, expected at least 20 bytes after the header, got 19")
 	})
@@ -293,7 +293,7 @@ func TestUnpackHeaderSampleShortHeader(t *testing.T) {
 		opener.EXPECT().DecryptHeader(data[len(data)-16:], gomock.Any(), gomock.Any())
 		opener.EXPECT().DecodePacketNumber(gomock.Any(), gomock.Any()).Return(protocol.PacketNumber(1337))
 		opener.EXPECT().Open(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return([]byte("decrypted"), nil)
-		_, _, _, _, err = unpacker.UnpackShortHeader(time.Now(), data)
+		_, _, _, _, err = unpacker.UnpackShortHeader(monotime.Now(), data)
 		require.NoError(t, err)
 	})
 }

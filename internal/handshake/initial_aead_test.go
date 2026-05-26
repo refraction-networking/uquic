@@ -2,9 +2,8 @@ package handshake
 
 import (
 	"bytes"
+	"crypto/rand"
 	"testing"
-
-	"golang.org/x/exp/rand"
 
 	"github.com/refraction-networking/uquic/internal/protocol"
 
@@ -247,7 +246,8 @@ func TestInitialAEADEncryptsAndDecryptsHeader(t *testing.T) {
 func BenchmarkInitialAEADCreate(b *testing.B) {
 	b.ReportAllocs()
 	connID := protocol.ParseConnectionID([]byte{0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef})
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		NewInitialAEAD(connID, protocol.PerspectiveServer, protocol.Version1)
 	}
 }
@@ -257,11 +257,10 @@ func BenchmarkInitialAEAD(b *testing.B) {
 	clientSealer, _ := NewInitialAEAD(connectionID, protocol.PerspectiveClient, protocol.Version1)
 	_, serverOpener := NewInitialAEAD(connectionID, protocol.PerspectiveServer, protocol.Version1)
 
-	r := rand.New(rand.NewSource(1))
 	packetData := make([]byte, 1200)
-	r.Read(packetData)
+	rand.Read(packetData)
 	hdr := make([]byte, 50)
-	r.Read(hdr)
+	rand.Read(hdr)
 	msg := clientSealer.Seal(nil, packetData, 42, hdr)
 	m, err := serverOpener.Open(nil, msg, 42, hdr)
 	if err != nil {
@@ -271,6 +270,7 @@ func BenchmarkInitialAEAD(b *testing.B) {
 		b.Fatal("decrypted data doesn't match")
 	}
 
+	b.ResetTimer()
 	b.Run("opening 100 bytes", func(b *testing.B) {
 		benchmarkOpen(b, serverOpener, clientSealer.Seal(nil, packetData[:100], 42, hdr), hdr)
 	})
@@ -283,7 +283,8 @@ func BenchmarkInitialAEAD(b *testing.B) {
 func benchmarkOpen(b *testing.B, aead LongHeaderOpener, msg, hdr []byte) {
 	b.ReportAllocs()
 	dst := make([]byte, 0, 1500)
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		dst = dst[:0]
 		if _, err := aead.Open(dst, msg, 42, hdr); err != nil {
 			b.Fatalf("opening failed: %s", err)
@@ -294,8 +295,11 @@ func benchmarkOpen(b *testing.B, aead LongHeaderOpener, msg, hdr []byte) {
 func benchmarkSeal(b *testing.B, aead LongHeaderSealer, msg, hdr []byte) {
 	b.ReportAllocs()
 	dst := make([]byte, 0, 1500)
-	for i := 0; i < b.N; i++ {
+
+	var pn protocol.PacketNumber
+	for b.Loop() {
 		dst = dst[:0]
-		aead.Seal(dst, msg, protocol.PacketNumber(i), hdr)
+		aead.Seal(dst, msg, pn, hdr)
+		pn++
 	}
 }

@@ -6,20 +6,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/refraction-networking/uquic/internal/monotime"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/utils"
-	"github.com/refraction-networking/uquic/logging"
+	"github.com/refraction-networking/uquic/qlog"
+	"github.com/refraction-networking/uquic/testutils/events"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestMTUDiscovererTiming(t *testing.T) {
 	const rtt = 100 * time.Millisecond
-	var rttStats utils.RTTStats
+	rttStats := utils.NewRTTStats()
 	rttStats.UpdateRTT(rtt, 0)
-	d := newMTUDiscoverer(&rttStats, 1000, 2000, nil)
+	d := newMTUDiscoverer(rttStats, 1000, 2000, nil)
 
-	now := time.Now()
+	now := monotime.Now()
 	require.False(t, d.ShouldSendProbe(now))
 	d.Start(now)
 	require.False(t, d.ShouldSendProbe(now))
@@ -37,15 +39,18 @@ func TestMTUDiscovererTiming(t *testing.T) {
 }
 
 func TestMTUDiscovererAckAndLoss(t *testing.T) {
-	d := newMTUDiscoverer(&utils.RTTStats{}, 1000, 2000, nil)
-	// we use an RTT of 0 here, so we don't have to advance the timer on every step
-	now := time.Now()
+	const rtt = 200 * time.Millisecond
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(rtt, 0)
+	d := newMTUDiscoverer(rttStats, 1000, 2000, nil)
+	now := monotime.Now()
 	ping, size := d.GetPing(now)
 	require.Equal(t, protocol.ByteCount(1500), size)
 	// the MTU is reduced if the frame is lost
 	ping.Handler.OnLost(ping.Frame)
 	require.Equal(t, protocol.ByteCount(1000), d.CurrentSize()) // no change to the MTU yet
 
+	now = now.Add(5 * rtt)
 	require.True(t, d.ShouldSendProbe(now))
 	ping, size = d.GetPing(now)
 	require.Equal(t, protocol.ByteCount(1250), size)
@@ -54,6 +59,7 @@ func TestMTUDiscovererAckAndLoss(t *testing.T) {
 
 	// Even though the 1500 byte MTU probe packet was lost, we try again with a higher MTU.
 	// This protects against regular (non-MTU-related) packet loss.
+	now = now.Add(5 * rtt)
 	require.True(t, d.ShouldSendProbe(now))
 	ping, size = d.GetPing(now)
 	require.Greater(t, size, protocol.ByteCount(1500))
@@ -63,6 +69,7 @@ func TestMTUDiscovererAckAndLoss(t *testing.T) {
 	// We continue probing until the MTU is close to the maximum.
 	var steps int
 	oldSize := size
+	now = now.Add(5 * rtt)
 	for d.ShouldSendProbe(now) {
 		ping, size = d.GetPing(now)
 		require.Greater(t, size, oldSize)
@@ -70,6 +77,7 @@ func TestMTUDiscovererAckAndLoss(t *testing.T) {
 		ping.Handler.OnAcked(ping.Frame)
 		steps++
 		require.Less(t, steps, 10)
+		now = now.Add(5 * rtt)
 	}
 	require.Less(t, 2000-maxMTUDiff, size)
 }
@@ -86,21 +94,13 @@ func testMTUDiscovererMTUDiscovery(t *testing.T) {
 	const rtt = 100 * time.Millisecond
 	const startMTU protocol.ByteCount = 1000
 
-	var rttStats utils.RTTStats
+	rttStats := utils.NewRTTStats()
 	rttStats.UpdateRTT(rtt, 0)
 
 	maxMTU := protocol.ByteCount(rand.IntN(int(3000-startMTU))) + startMTU + 1
-	var tracedMTU protocol.ByteCount
-	var tracerDone bool
-	d := newMTUDiscoverer(&rttStats, startMTU, maxMTU,
-		&logging.ConnectionTracer{
-			UpdatedMTU: func(mtu logging.ByteCount, done bool) {
-				tracedMTU = mtu
-				tracerDone = done
-			},
-		},
-	)
-	now := time.Now()
+	var eventRecorder events.Recorder
+	d := newMTUDiscoverer(rttStats, startMTU, maxMTU, &eventRecorder)
+	now := monotime.Now()
 	d.Start(now)
 	realMTU := protocol.ByteCount(rand.IntN(int(maxMTU-startMTU))) + startMTU
 	t.Logf("MTU: %d, max: %d", realMTU, maxMTU)
@@ -121,8 +121,9 @@ func testMTUDiscovererMTUDiscovery(t *testing.T) {
 	diff := realMTU - currentMTU
 	require.GreaterOrEqual(t, diff, protocol.ByteCount(0))
 	if maxMTU > currentMTU+maxMTU {
-		require.Equal(t, currentMTU, tracedMTU)
-		require.True(t, tracerDone)
+		events := eventRecorder.Events(qlog.MTUUpdated{})
+		require.NotEmpty(t, events)
+		require.Equal(t, qlog.MTUUpdated{Value: int(currentMTU), Done: true}, events[0])
 	}
 	t.Logf("MTU discovered: %d (diff: %d)", currentMTU, diff)
 	t.Logf("probes sent (%d): %v", len(probes), probes)
@@ -142,24 +143,15 @@ func testMTUDiscovererWithRandomLoss(t *testing.T) {
 	const startMTU protocol.ByteCount = 1000
 	const maxRandomLoss = maxLostMTUProbes - 1
 
-	rttStats := &utils.RTTStats{}
+	rttStats := utils.NewRTTStats()
 	rttStats.SetInitialRTT(rtt)
 	require.Equal(t, rtt, rttStats.SmoothedRTT())
 
 	maxMTU := protocol.ByteCount(rand.IntN(int(3000-startMTU))) + startMTU + 1
-	var tracedMTU protocol.ByteCount
-	var tracerDone bool
-
-	d := newMTUDiscoverer(rttStats, startMTU, maxMTU,
-		&logging.ConnectionTracer{
-			UpdatedMTU: func(mtu logging.ByteCount, done bool) {
-				tracedMTU = mtu
-				tracerDone = done
-			},
-		},
-	)
-	d.Start(time.Now())
-	now := time.Now()
+	var eventRecorder events.Recorder
+	d := newMTUDiscoverer(rttStats, startMTU, maxMTU, &eventRecorder)
+	d.Start(monotime.Now())
+	now := monotime.Now()
 	realMTU := protocol.ByteCount(rand.IntN(int(maxMTU-startMTU))) + startMTU
 	t.Logf("MTU: %d, max: %d", realMTU, maxMTU)
 	now = now.Add(mtuProbeDelay * rtt)
@@ -190,8 +182,9 @@ func testMTUDiscovererWithRandomLoss(t *testing.T) {
 	diff := realMTU - currentMTU
 	require.GreaterOrEqual(t, diff, protocol.ByteCount(0))
 	if maxMTU > currentMTU+maxMTU {
-		require.Equal(t, currentMTU, tracedMTU)
-		require.True(t, tracerDone)
+		events := eventRecorder.Events(qlog.MTUUpdated{})
+		require.NotEmpty(t, events)
+		require.Equal(t, qlog.MTUUpdated{Value: int(currentMTU), Done: true}, events[0])
 	}
 	t.Logf("MTU discovered with random losses %v: %d (diff: %d)", randomLosses, currentMTU, diff)
 	t.Logf("probes sent (%d): %v", len(probes), probes)
@@ -212,10 +205,10 @@ func testMTUDiscovererReset(t *testing.T, ackLastProbe bool) {
 	const maxMTU = 1400
 	const rtt = 100 * time.Millisecond
 
-	rttStats := &utils.RTTStats{}
+	rttStats := utils.NewRTTStats()
 	rttStats.SetInitialRTT(rtt)
 
-	now := time.Now()
+	now := monotime.Now()
 	d := newMTUDiscoverer(rttStats, startMTU, maxMTU, nil)
 	d.Start(now)
 

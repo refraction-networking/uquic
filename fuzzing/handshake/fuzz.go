@@ -2,19 +2,17 @@ package handshake
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math"
-	mrand "math/rand"
+	mrand "math/rand/v2"
 	"net"
-	"time"
-
-	tls "github.com/refraction-networking/utls"
 
 	"github.com/refraction-networking/uquic/fuzzing/internal/helper"
 	"github.com/refraction-networking/uquic/internal/handshake"
@@ -31,7 +29,7 @@ var (
 )
 
 func init() {
-	priv, err := rsa.GenerateKey(rand.Reader, 1024)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -40,7 +38,7 @@ func init() {
 		log.Fatal(err)
 	}
 
-	privClient, err := rsa.GenerateKey(rand.Reader, 1024)
+	_, privClient, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -121,13 +119,13 @@ func toEncryptionLevel(n uint8) protocol.EncryptionLevel {
 
 func getTransportParameters(seed uint8) *wire.TransportParameters {
 	const maxVarInt = math.MaxUint64 / 4
-	r := mrand.New(mrand.NewSource(int64(seed)))
+	r := mrand.New(mrand.NewPCG(uint64(seed), uint64(seed)))
 	return &wire.TransportParameters{
 		ActiveConnectionIDLimit:        2,
-		InitialMaxData:                 protocol.ByteCount(r.Int63n(maxVarInt)),
-		InitialMaxStreamDataBidiLocal:  protocol.ByteCount(r.Int63n(maxVarInt)),
-		InitialMaxStreamDataBidiRemote: protocol.ByteCount(r.Int63n(maxVarInt)),
-		InitialMaxStreamDataUni:        protocol.ByteCount(r.Int63n(maxVarInt)),
+		InitialMaxData:                 protocol.ByteCount(r.Uint64() % maxVarInt),
+		InitialMaxStreamDataBidiLocal:  protocol.ByteCount(r.Uint64() % maxVarInt),
+		InitialMaxStreamDataBidiRemote: protocol.ByteCount(r.Uint64() % maxVarInt),
+		InitialMaxStreamDataUni:        protocol.ByteCount(r.Uint64() % maxVarInt),
 	}
 }
 
@@ -392,7 +390,7 @@ func runHandshake(runConfig [confLen]byte, messageConfig uint8, clientConf *tls.
 	}
 	const msg = "Lorem ipsum dolor sit amet, consectetur adipiscing elit."
 	encrypted := sealer.Seal(nil, []byte(msg), 1337, []byte("foobar"))
-	decrypted, err := opener.Open(nil, encrypted, time.Time{}, 1337, protocol.KeyPhaseZero, []byte("foobar"))
+	decrypted, err := opener.Open(nil, encrypted, 0, 1337, protocol.KeyPhaseZero, []byte("foobar"))
 	if err != nil {
 		panic(fmt.Sprintf("Decrypting message failed: %s", err.Error()))
 	}

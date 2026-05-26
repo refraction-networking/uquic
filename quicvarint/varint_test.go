@@ -2,10 +2,10 @@ package quicvarint
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"math/rand/v2"
 	"testing"
-
-	"golang.org/x/exp/rand"
 
 	"github.com/stretchr/testify/require"
 )
@@ -15,7 +15,7 @@ func TestLimits(t *testing.T) {
 	require.Equal(t, uint64(1<<62-1), uint64(Max))
 }
 
-func TestParsing(t *testing.T) {
+func TestRead(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    []byte
@@ -39,6 +39,29 @@ func TestParsing(t *testing.T) {
 	}
 }
 
+func TestParse(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         []byte
+		expectedValue uint64
+		expectedLen   int
+	}{
+		{"1 byte", []byte{0b00011001}, 25, 1},
+		{"2 byte", []byte{0b01111011, 0xbd}, 15293, 2},
+		{"4 byte", []byte{0b10011101, 0x7f, 0x3e, 0x7d}, 494878333, 4},
+		{"8 byte", []byte{0b11000010, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c}, 151288809941952652, 8},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			value, l, err := Parse(tt.input)
+			require.Equal(t, tt.expectedValue, value)
+			require.Equal(t, tt.expectedLen, l)
+			require.Nil(t, err)
+		})
+	}
+}
+
 func TestParsingFailures(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -51,15 +74,27 @@ func TestParsingFailures(t *testing.T) {
 			expectedErr: io.EOF,
 		},
 		{
-			name:        "slice too short",
-			input:       Append(nil, maxVarInt2*10)[:3],
+			name:        "2-byte encoding: not enough bytes",
+			input:       []byte{0b01000001},
+			expectedErr: io.ErrUnexpectedEOF,
+		},
+		{
+			name:        "4-byte encoding: not enough bytes",
+			input:       []byte{0b10000000, 0x0, 0x0},
+			expectedErr: io.ErrUnexpectedEOF,
+		},
+		{
+			name:        "8-byte encoding: not enough bytes",
+			input:       []byte{0b11000000, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
 			expectedErr: io.ErrUnexpectedEOF,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := Parse(tt.input)
+			value, l, err := Parse(tt.input)
+			require.Equal(t, uint64(0), value)
+			require.Equal(t, 0, l)
 			require.Equal(t, tt.expectedErr, err)
 		})
 	}
@@ -91,7 +126,10 @@ func TestVarintEncoding(t *testing.T) {
 	}
 
 	t.Run("panics when given a too large number (> 62 bit)", func(t *testing.T) {
-		require.Panics(t, func() { Append(nil, maxVarInt8+1) })
+		require.PanicsWithError(t,
+			fmt.Sprintf("value doesn't fit into 62 bits: %d", maxVarInt8+1),
+			func() { Append(nil, maxVarInt8+1) },
+		)
 	})
 }
 
@@ -169,7 +207,10 @@ func TestLen(t *testing.T) {
 	}
 
 	t.Run("panics on too large number", func(t *testing.T) {
-		require.Panics(t, func() { Len(maxVarInt8 + 1) })
+		require.PanicsWithError(t,
+			fmt.Sprintf("value doesn't fit into 62 bits: %d", maxVarInt8+1),
+			func() { Len(maxVarInt8 + 1) },
+		)
 	})
 }
 
@@ -178,11 +219,12 @@ type benchmarkValue struct {
 	v uint64
 }
 
-func randomValues(num int, maxValue uint64) []benchmarkValue {
-	r := rand.New(rand.NewSource(1))
+func randomValues(maxValue uint64) []benchmarkValue {
+	r := rand.New(rand.NewPCG(13, 37))
 
+	const num = 1025
 	bv := make([]benchmarkValue, num)
-	for i := 0; i < num; i++ {
+	for i := range num {
 		v := r.Uint64() % maxValue
 		bv[i].v = v
 		bv[i].b = Append([]byte{}, v)
@@ -190,20 +232,43 @@ func randomValues(num int, maxValue uint64) []benchmarkValue {
 	return bv
 }
 
-func BenchmarkRead(b *testing.B) {
-	b.Run("1-byte", func(b *testing.B) { benchmarkRead(b, randomValues(min(b.N, 1024), maxVarInt1)) })
-	b.Run("2-byte", func(b *testing.B) { benchmarkRead(b, randomValues(min(b.N, 1024), maxVarInt2)) })
-	b.Run("4-byte", func(b *testing.B) { benchmarkRead(b, randomValues(min(b.N, 1024), maxVarInt4)) })
-	b.Run("8-byte", func(b *testing.B) { benchmarkRead(b, randomValues(min(b.N, 1024), maxVarInt8)) })
+// using a reader that is also an io.ByteReader
+func BenchmarkReadBytesReader(b *testing.B) {
+	b.Run("1-byte", func(b *testing.B) { benchmarkRead(b, randomValues(maxVarInt1), false) })
+	b.Run("2-byte", func(b *testing.B) { benchmarkRead(b, randomValues(maxVarInt2), false) })
+	b.Run("4-byte", func(b *testing.B) { benchmarkRead(b, randomValues(maxVarInt4), false) })
+	b.Run("8-byte", func(b *testing.B) { benchmarkRead(b, randomValues(maxVarInt8), false) })
 }
 
-func benchmarkRead(b *testing.B, inputs []benchmarkValue) {
+// using a reader that is not an io.ByteReader
+func BenchmarkReadSimpleReader(b *testing.B) {
+	b.Run("1-byte", func(b *testing.B) { benchmarkRead(b, randomValues(maxVarInt1), true) })
+	b.Run("2-byte", func(b *testing.B) { benchmarkRead(b, randomValues(maxVarInt2), true) })
+	b.Run("4-byte", func(b *testing.B) { benchmarkRead(b, randomValues(maxVarInt4), true) })
+	b.Run("8-byte", func(b *testing.B) { benchmarkRead(b, randomValues(maxVarInt8), true) })
+}
+
+// simpleReader satisfies io.Reader, but not io.ByteReader
+// This means that NewReader will need to wrap the reader.
+type simpleReader struct {
+	io.Reader
+}
+
+func benchmarkRead(b *testing.B, inputs []benchmarkValue, wrapBytesReader bool) {
 	r := bytes.NewReader([]byte{})
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	var vr Reader
+	if wrapBytesReader {
+		vr = NewReader(&simpleReader{r})
+	} else {
+		vr = NewReader(r)
+	}
+
+	var i int
+	for b.Loop() {
 		index := i % len(inputs)
+		i++
 		r.Reset(inputs[index].b)
-		val, err := Read(r)
+		val, err := Read(vr)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -214,16 +279,17 @@ func benchmarkRead(b *testing.B, inputs []benchmarkValue) {
 }
 
 func BenchmarkParse(b *testing.B) {
-	b.Run("1-byte", func(b *testing.B) { benchmarkParse(b, randomValues(min(b.N, 1024), maxVarInt1)) })
-	b.Run("2-byte", func(b *testing.B) { benchmarkParse(b, randomValues(min(b.N, 1024), maxVarInt2)) })
-	b.Run("4-byte", func(b *testing.B) { benchmarkParse(b, randomValues(min(b.N, 1024), maxVarInt4)) })
-	b.Run("8-byte", func(b *testing.B) { benchmarkParse(b, randomValues(min(b.N, 1024), maxVarInt8)) })
+	b.Run("1-byte", func(b *testing.B) { benchmarkParse(b, randomValues(maxVarInt1)) })
+	b.Run("2-byte", func(b *testing.B) { benchmarkParse(b, randomValues(maxVarInt2)) })
+	b.Run("4-byte", func(b *testing.B) { benchmarkParse(b, randomValues(maxVarInt4)) })
+	b.Run("8-byte", func(b *testing.B) { benchmarkParse(b, randomValues(maxVarInt8)) })
 }
 
 func benchmarkParse(b *testing.B, inputs []benchmarkValue) {
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		index := i % 1024
+	var i int
+	for b.Loop() {
+		index := i % len(inputs)
+		i++
 		val, n, err := Parse(inputs[index].b)
 		if err != nil {
 			b.Fatal(err)
@@ -238,22 +304,47 @@ func benchmarkParse(b *testing.B, inputs []benchmarkValue) {
 }
 
 func BenchmarkAppend(b *testing.B) {
-	b.Run("1-byte", func(b *testing.B) { benchmarkAppend(b, randomValues(min(b.N, 1024), maxVarInt1)) })
-	b.Run("2-byte", func(b *testing.B) { benchmarkAppend(b, randomValues(min(b.N, 1024), maxVarInt2)) })
-	b.Run("4-byte", func(b *testing.B) { benchmarkAppend(b, randomValues(min(b.N, 1024), maxVarInt4)) })
-	b.Run("8-byte", func(b *testing.B) { benchmarkAppend(b, randomValues(min(b.N, 1024), maxVarInt8)) })
+	b.Run("1-byte", func(b *testing.B) { benchmarkAppend(b, randomValues(maxVarInt1)) })
+	b.Run("2-byte", func(b *testing.B) { benchmarkAppend(b, randomValues(maxVarInt2)) })
+	b.Run("4-byte", func(b *testing.B) { benchmarkAppend(b, randomValues(maxVarInt4)) })
+	b.Run("8-byte", func(b *testing.B) { benchmarkAppend(b, randomValues(maxVarInt8)) })
 }
 
 func benchmarkAppend(b *testing.B, inputs []benchmarkValue) {
 	buf := make([]byte, 8)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	var i int
+	for b.Loop() {
 		buf = buf[:0]
-		index := i % 1024
+		index := i % len(inputs)
+		i++
 		buf = Append(buf, inputs[index].v)
 
 		if !bytes.Equal(buf, inputs[index].b) {
-			b.Fatalf("expected to write %v, wrote %v", inputs[i].b, buf)
+			b.Fatalf("expected to write %v, wrote %v", inputs[index].b, buf)
+		}
+	}
+}
+
+func BenchmarkAppendWithLen(b *testing.B) {
+	b.Run("1-byte", func(b *testing.B) { benchmarkAppendWithLen(b, randomValues(maxVarInt1)) })
+	b.Run("2-byte", func(b *testing.B) { benchmarkAppendWithLen(b, randomValues(maxVarInt2)) })
+	b.Run("4-byte", func(b *testing.B) { benchmarkAppendWithLen(b, randomValues(maxVarInt4)) })
+	b.Run("8-byte", func(b *testing.B) { benchmarkAppendWithLen(b, randomValues(maxVarInt8)) })
+}
+
+func benchmarkAppendWithLen(b *testing.B, inputs []benchmarkValue) {
+	buf := make([]byte, 8)
+
+	var i int
+	for b.Loop() {
+		buf = buf[:0]
+		index := i % len(inputs)
+		i++
+		buf = AppendWithLen(buf, inputs[index].v, len(inputs[index].b))
+
+		if !bytes.Equal(buf, inputs[index].b) {
+			b.Fatalf("expected to write %v, wrote %v", inputs[index].b, buf)
 		}
 	}
 }

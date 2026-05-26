@@ -93,7 +93,7 @@ func TestAddTimestamp(t *testing.T) {
 	DefaultLogger.SetLogLevel(LogLevelInfo)
 	DefaultLogger.Infof("info")
 	timestamp := b.String()[:b.Len()-6]
-	parsedTime, err := time.Parse(format, timestamp)
+	parsedTime, err := time.ParseInLocation(format, timestamp, time.Local)
 	require.NoError(t, err)
 	require.WithinDuration(t, time.Now(), parsedTime, 25*time.Hour)
 }
@@ -123,8 +123,6 @@ func TestLogAddPrefixes(t *testing.T) {
 }
 
 func TestLogLevelFromEnv(t *testing.T) {
-	defer os.Unsetenv(logEnv)
-
 	testCases := []struct {
 		envValue string
 		expected LogLevel
@@ -136,13 +134,13 @@ func TestLogLevelFromEnv(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		os.Setenv(logEnv, tc.envValue)
+		t.Setenv(logEnv, tc.envValue)
 		require.Equal(t, tc.expected, readLoggingEnv())
 	}
 
 	// invalid values
-	os.Setenv(logEnv, "")
+	t.Setenv(logEnv, "")
 	require.Equal(t, LogLevelNothing, readLoggingEnv())
-	os.Setenv(logEnv, "asdf")
+	t.Setenv(logEnv, "asdf")
 	require.Equal(t, LogLevelNothing, readLoggingEnv())
 }

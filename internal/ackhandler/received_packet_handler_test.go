@@ -4,25 +4,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/refraction-networking/uquic/internal/monotime"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/utils"
 	"github.com/refraction-networking/uquic/internal/wire"
 
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 )
 
 func TestGenerateACKsForPacketNumberSpaces(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	sentPackets := NewMockSentPacketTracker(ctrl)
-	handler := newReceivedPacketHandler(sentPackets, utils.DefaultLogger)
+	handler := NewReceivedPacketHandler(utils.DefaultLogger)
 
-	now := time.Now()
+	now := monotime.Now()
 	sendTime := now.Add(-time.Second)
-	sentPackets.EXPECT().GetLowestPacketNotConfirmedAcked().AnyTimes()
-	sentPackets.EXPECT().ReceivedPacket(protocol.EncryptionInitial, sendTime).Times(2)
-	sentPackets.EXPECT().ReceivedPacket(protocol.EncryptionHandshake, sendTime).Times(2)
-	sentPackets.EXPECT().ReceivedPacket(protocol.Encryption1RTT, sendTime).Times(2)
 
 	require.NoError(t, handler.ReceivedPacket(2, protocol.ECT0, protocol.EncryptionInitial, sendTime, true))
 	require.NoError(t, handler.ReceivedPacket(1, protocol.ECT1, protocol.EncryptionHandshake, sendTime, true))
@@ -60,19 +54,14 @@ func TestGenerateACKsForPacketNumberSpaces(t *testing.T) {
 }
 
 func TestReceive0RTTAnd1RTT(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	sentPackets := NewMockSentPacketTracker(mockCtrl)
-	handler := newReceivedPacketHandler(sentPackets, utils.DefaultLogger)
+	handler := NewReceivedPacketHandler(utils.DefaultLogger)
 
-	sendTime := time.Now().Add(-time.Second)
-	sentPackets.EXPECT().GetLowestPacketNotConfirmedAcked().AnyTimes()
-	sentPackets.EXPECT().ReceivedPacket(protocol.Encryption0RTT, sendTime).AnyTimes()
-	sentPackets.EXPECT().ReceivedPacket(protocol.Encryption1RTT, sendTime)
+	sendTime := monotime.Now().Add(-time.Second)
 
 	require.NoError(t, handler.ReceivedPacket(2, protocol.ECNNon, protocol.Encryption0RTT, sendTime, true))
 	require.NoError(t, handler.ReceivedPacket(3, protocol.ECNNon, protocol.Encryption1RTT, sendTime, true))
 
-	ack := handler.GetAckFrame(protocol.Encryption1RTT, time.Now(), true)
+	ack := handler.GetAckFrame(protocol.Encryption1RTT, monotime.Now(), true)
 	require.NotNil(t, ack)
 	require.Equal(t, []wire.AckRange{{Smallest: 2, Largest: 3}}, ack.AckRanges)
 
@@ -83,67 +72,54 @@ func TestReceive0RTTAnd1RTT(t *testing.T) {
 }
 
 func TestDropPackets(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	sentPackets := NewMockSentPacketTracker(mockCtrl)
-	sentPackets.EXPECT().ReceivedPacket(gomock.Any(), gomock.Any()).AnyTimes()
-	sentPackets.EXPECT().GetLowestPacketNotConfirmedAcked().AnyTimes()
-	handler := newReceivedPacketHandler(sentPackets, utils.DefaultLogger)
+	handler := NewReceivedPacketHandler(utils.DefaultLogger)
 
-	sendTime := time.Now().Add(-time.Second)
+	sendTime := monotime.Now().Add(-time.Second)
 
 	require.NoError(t, handler.ReceivedPacket(2, protocol.ECNNon, protocol.EncryptionInitial, sendTime, true))
 	require.NoError(t, handler.ReceivedPacket(1, protocol.ECNNon, protocol.EncryptionHandshake, sendTime, true))
 	require.NoError(t, handler.ReceivedPacket(2, protocol.ECNNon, protocol.Encryption1RTT, sendTime, true))
 
 	// Initial
-	require.NotNil(t, handler.GetAckFrame(protocol.EncryptionInitial, time.Now(), true))
+	require.NotNil(t, handler.GetAckFrame(protocol.EncryptionInitial, monotime.Now(), true))
 	handler.DropPackets(protocol.EncryptionInitial)
-	require.Nil(t, handler.GetAckFrame(protocol.EncryptionInitial, time.Now(), true))
+	require.Nil(t, handler.GetAckFrame(protocol.EncryptionInitial, monotime.Now(), true))
 
 	// Handshake
-	require.NotNil(t, handler.GetAckFrame(protocol.EncryptionHandshake, time.Now(), true))
+	require.NotNil(t, handler.GetAckFrame(protocol.EncryptionHandshake, monotime.Now(), true))
 	handler.DropPackets(protocol.EncryptionHandshake)
-	require.Nil(t, handler.GetAckFrame(protocol.EncryptionHandshake, time.Now(), true))
+	require.Nil(t, handler.GetAckFrame(protocol.EncryptionHandshake, monotime.Now(), true))
 
 	// 1-RTT
-	require.NotNil(t, handler.GetAckFrame(protocol.Encryption1RTT, time.Now(), true))
+	require.NotNil(t, handler.GetAckFrame(protocol.Encryption1RTT, monotime.Now(), true))
 
 	// 0-RTT is a no-op
 	handler.DropPackets(protocol.Encryption0RTT)
 }
 
 func TestAckRangePruning(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	sentPackets := NewMockSentPacketTracker(mockCtrl)
-	sentPackets.EXPECT().ReceivedPacket(gomock.Any(), gomock.Any()).AnyTimes()
-	sentPackets.EXPECT().GetLowestPacketNotConfirmedAcked().Times(3)
-	handler := newReceivedPacketHandler(sentPackets, utils.DefaultLogger)
+	handler := NewReceivedPacketHandler(utils.DefaultLogger)
 
-	sendTime := time.Now()
+	sendTime := monotime.Now()
 	require.NoError(t, handler.ReceivedPacket(1, protocol.ECNNon, protocol.Encryption1RTT, sendTime, true))
 	require.NoError(t, handler.ReceivedPacket(2, protocol.ECNNon, protocol.Encryption1RTT, sendTime, true))
 
-	ack := handler.GetAckFrame(protocol.Encryption1RTT, time.Now(), true)
+	ack := handler.GetAckFrame(protocol.Encryption1RTT, monotime.Now(), true)
 	require.NotNil(t, ack)
 	require.Equal(t, []wire.AckRange{{Smallest: 1, Largest: 2}}, ack.AckRanges)
 
 	require.NoError(t, handler.ReceivedPacket(3, protocol.ECNNon, protocol.Encryption1RTT, sendTime, true))
-	sentPackets.EXPECT().GetLowestPacketNotConfirmedAcked().Return(protocol.PacketNumber(2))
+	handler.IgnorePacketsBelow(2)
 	require.NoError(t, handler.ReceivedPacket(4, protocol.ECNNon, protocol.Encryption1RTT, sendTime, true))
 
-	ack = handler.GetAckFrame(protocol.Encryption1RTT, time.Now(), true)
+	ack = handler.GetAckFrame(protocol.Encryption1RTT, monotime.Now(), true)
 	require.NotNil(t, ack)
 	require.Equal(t, []wire.AckRange{{Smallest: 2, Largest: 4}}, ack.AckRanges)
 }
 
 func TestPacketDuplicateDetection(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	sentPackets := NewMockSentPacketTracker(mockCtrl)
-	sentPackets.EXPECT().ReceivedPacket(gomock.Any(), gomock.Any()).AnyTimes()
-	sentPackets.EXPECT().GetLowestPacketNotConfirmedAcked().AnyTimes()
-
-	handler := newReceivedPacketHandler(sentPackets, utils.DefaultLogger)
-	sendTime := time.Now()
+	handler := NewReceivedPacketHandler(utils.DefaultLogger)
+	sendTime := monotime.Now()
 
 	// 1-RTT is tested separately at the end
 	encLevels := []protocol.EncryptionLevel{

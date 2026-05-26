@@ -2,6 +2,7 @@ package frames
 
 import (
 	"fmt"
+	"io"
 
 	"github.com/refraction-networking/uquic/internal/ackhandler"
 	"github.com/refraction-networking/uquic/internal/protocol"
@@ -34,22 +35,39 @@ func Fuzz(data []byte) int {
 	encLevel := toEncLevel(data[0])
 	data = data[PrefixLen:]
 
-	parser := wire.NewFrameParser(true)
+	parser := wire.NewFrameParser(true, true, true)
 	parser.SetAckDelayExponent(protocol.DefaultAckDelayExponent)
 
 	var numFrames int
 	var b []byte
 	for len(data) > 0 {
 		initialLen := len(data)
-		l, f, err := parser.ParseNext(data, encLevel, version)
+		frameType, l, err := parser.ParseType(data, encLevel)
+		if err != nil {
+			if err == io.EOF { // the last frame was a PADDING frame
+				break
+			}
+			break
+		}
+
+		data = data[l:]
+		numFrames++
+
+		var f wire.Frame
+		switch {
+		case frameType.IsStreamFrameType():
+			f, l, err = parser.ParseStreamFrame(frameType, data, version)
+		case frameType == wire.FrameTypeAck || frameType == wire.FrameTypeAckECN:
+			f, l, err = parser.ParseAckFrame(frameType, data, encLevel, version)
+		case frameType == wire.FrameTypeDatagramNoLength || frameType == wire.FrameTypeDatagramWithLength:
+			f, l, err = parser.ParseDatagramFrame(frameType, data, version)
+		default:
+			f, l, err = parser.ParseLessCommonFrame(frameType, data, version)
+		}
 		if err != nil {
 			break
 		}
 		data = data[l:]
-		numFrames++
-		if f == nil { // PADDING frame
-			continue
-		}
 		wire.IsProbingFrame(f)
 		ackhandler.IsFrameAckEliciting(f)
 		// We accept empty STREAM frames, but we don't write them.
@@ -130,6 +148,14 @@ func validateFrame(frame wire.Frame) {
 	case *wire.ConnectionCloseFrame:
 		if f.IsApplicationError && f.FrameType != 0 {
 			panic("CONNECTION_CLOSE for an application error containing a frame type")
+		}
+	case *wire.ResetStreamFrame:
+		if f.FinalSize < f.ReliableSize {
+			panic("RESET_STREAM frame with a FinalSize smaller than the ReliableSize")
+		}
+	case *wire.AckFrequencyFrame:
+		if f.RequestMaxAckDelay < 0 {
+			panic("ACK_FREQUENCY frame with a negative RequestMaxAckDelay")
 		}
 	}
 }

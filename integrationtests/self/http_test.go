@@ -5,27 +5,32 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
-	mrand "math/rand"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/textproto"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	tls "github.com/refraction-networking/utls"
 	"golang.org/x/sync/errgroup"
 
-	quic "github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic"
 	"github.com/refraction-networking/uquic/http3"
+	"github.com/refraction-networking/uquic/http3/qlog"
 	quicproxy "github.com/refraction-networking/uquic/integrationtests/tools/proxy"
+	"github.com/refraction-networking/uquic/internal/protocol"
+	"github.com/refraction-networking/uquic/testutils/events"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,7 +47,7 @@ func randomString(length int) string {
 	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, length)
 	for i := range b {
-		n := mrand.Intn(len(alphabet))
+		n := mrand.IntN(len(alphabet))
 		b[i] = alphabet[n]
 	}
 	return string(b)
@@ -59,7 +64,7 @@ func startHTTPServer(t *testing.T, mux *http.ServeMux, opts ...func(*http3.Serve
 		opt(server)
 	}
 
-	conn := newUPDConnLocalhost(t)
+	conn := newUDPConnLocalhost(t)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -77,12 +82,16 @@ func startHTTPServer(t *testing.T, mux *http.ServeMux, opts ...func(*http3.Serve
 	return conn.LocalAddr().(*net.UDPAddr).Port
 }
 
-func newHTTP3Client(t *testing.T) *http.Client {
+func newHTTP3Client(t *testing.T, opts ...func(*http3.Transport)) *http.Client {
 	tr := &http3.Transport{
 		TLSClientConfig:    getTLSClientConfigWithoutServerName(),
 		QUICConfig:         getQuicConfig(&quic.Config{MaxIdleTimeout: 10 * time.Second}),
 		DisableCompression: true,
 	}
+	for _, opt := range opts {
+		opt(tr)
+	}
+	addDialCallback(t, tr)
 	t.Cleanup(func() { tr.Close() })
 	return &http.Client{Transport: tr}
 }
@@ -207,8 +216,8 @@ func TestHTTPMultipleRequests(t *testing.T) {
 func TestContentLengthForSmallResponse(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/small", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("foo"))
-		w.Write([]byte("bar"))
+		io.WriteString(w, "foo")
+		io.WriteString(w, "bar")
 	})
 	port := startHTTPServer(t, mux)
 
@@ -240,7 +249,134 @@ func TestHTTPHeaders(t *testing.T) {
 	require.Equal(t, echoHdr, resp.Header.Get("echo"))
 }
 
-func TestHTTPTrailers(t *testing.T) {
+func TestHTTPHeaderSizeLimitServer(t *testing.T) {
+	t.Run("large HEADERS frame", func(t *testing.T) {
+		const limit = 1024
+		hdr := make(http.Header)
+		for range 20 {
+			hdr.Add(randomString(50), randomString(50))
+		}
+		headersFrameSize := testHTTPHeaderSizeLimitServer(t, hdr, limit)
+		require.Greater(t, headersFrameSize, limit)
+	})
+
+	t.Run("large decompressed HEADERS frame", func(t *testing.T) {
+		const limit = 1024
+		hdr := make(http.Header)
+		for range 200 {
+			// This is a QPACK static table entry, so it will be compressed.
+			hdr.Add("content-type", "text/plain;charset=utf-8")
+		}
+		headersFrameSize := testHTTPHeaderSizeLimitServer(t, hdr, limit)
+		require.Less(t, headersFrameSize, limit)
+	})
+}
+
+func testHTTPHeaderSizeLimitServer(t *testing.T, hdr http.Header, limit int) (headersFrameSize int) {
+	mux := http.NewServeMux()
+	var handlerCalled bool
+	mux.HandleFunc("/headers", func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+	})
+	port := startHTTPServer(t, mux, func(s *http3.Server) { s.MaxHeaderBytes = limit })
+
+	var eventRecorder events.Recorder
+	cl := newHTTP3Client(t, func(tr *http3.Transport) {
+		tr.QUICConfig = getQuicConfig(&quic.Config{
+			MaxIdleTimeout: 10 * time.Second,
+			Tracer:         newTracer(&eventRecorder),
+		})
+	})
+
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://localhost:%d/headers", port), nil)
+	require.NoError(t, err)
+	req.Header = hdr
+
+	resp, err := cl.Do(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusRequestHeaderFieldsTooLarge, resp.StatusCode)
+	require.False(t, handlerCalled)
+
+	for _, ev := range eventRecorder.Events(qlog.FrameCreated{}) {
+		fc := ev.(qlog.FrameCreated)
+		if _, ok := fc.Frame.Frame.(qlog.HeadersFrame); ok {
+			headersFrameSize = fc.Raw.Length
+			break
+		}
+	}
+	return headersFrameSize
+}
+
+func TestHTTPHeaderSizeLimitClient(t *testing.T) {
+	t.Run("large HEADERS frame", func(t *testing.T) {
+		const limit = 1024
+		hdr := make(http.Header)
+		for range 20 {
+			hdr.Add(randomString(50), randomString(50))
+		}
+		headersFrameSize, requestErr := testHTTPHeaderSizeLimitClient(t, hdr, limit)
+		require.ErrorContains(t, requestErr, "http3: HEADERS frame too large")
+		require.Greater(t, headersFrameSize, limit)
+	})
+
+	t.Run("large decompressed HEADERS frame", func(t *testing.T) {
+		const limit = 1024
+		hdr := make(http.Header)
+		for range 200 {
+			// This is a QPACK static table entry, so it will be compressed.
+			hdr.Add("content-type", "text/plain;charset=utf-8")
+		}
+		headersFrameSize, requestErr := testHTTPHeaderSizeLimitClient(t, hdr, limit)
+		require.ErrorContains(t, requestErr, "http3: headers too large")
+		require.Less(t, headersFrameSize, limit)
+	})
+}
+
+func testHTTPHeaderSizeLimitClient(t *testing.T, hdr http.Header, limit int) (headersFrameSize int, requestErr error) {
+	mux := http.NewServeMux()
+	var handlerCalled atomic.Bool
+	mux.HandleFunc("/headers", func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled.Store(true)
+		for k, v := range hdr {
+			for _, val := range v {
+				w.Header().Add(k, val)
+			}
+		}
+	})
+	port := startHTTPServer(t, mux)
+
+	var eventRecorder events.Recorder
+	cl := newHTTP3Client(t,
+		func(tr *http3.Transport) {
+			tr.MaxResponseHeaderBytes = limit
+			tr.QUICConfig = getQuicConfig(&quic.Config{
+				MaxIdleTimeout: 10 * time.Second,
+				Tracer:         newTracer(&eventRecorder),
+			})
+		},
+	)
+
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://localhost:%d/headers", port), nil)
+	require.NoError(t, err)
+
+	_, requestErr = cl.Do(req)
+	require.Error(t, requestErr)
+	require.True(t, handlerCalled.Load())
+
+	var found bool
+	for _, ev := range eventRecorder.Events(qlog.FrameParsed{}) {
+		fp := ev.(qlog.FrameParsed)
+		if _, ok := fp.Frame.Frame.(qlog.HeadersFrame); ok {
+			headersFrameSize = fp.Raw.PayloadLength
+			found = true
+			break
+		}
+	}
+	require.True(t, found)
+	return headersFrameSize, requestErr
+}
+
+func TestHTTPResponseTrailers(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/trailers", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Trailer", "AtEnd1, AtEnd2")
@@ -291,12 +427,93 @@ func TestHTTPTrailers(t *testing.T) {
 	}), resp.Trailer)
 }
 
+func TestHTTPRequestTrailers(t *testing.T) {
+	trailerChan := make(chan http.Header, 2)
+	bodyChan := make(chan string, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/client-trailers", func(w http.ResponseWriter, r *http.Request) {
+		trailerBeforeBody := make(http.Header)
+		for k, v := range r.Trailer {
+			trailerBeforeBody[k] = v
+		}
+		trailerChan <- trailerBeforeBody
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		bodyChan <- string(body)
+
+		trailer := make(http.Header)
+		for k, v := range r.Trailer {
+			trailer[k] = v
+		}
+		trailerChan <- trailer
+
+		w.WriteHeader(http.StatusOK)
+	})
+
+	port := startHTTPServer(t, mux)
+
+	pr, pw := io.Pipe()
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("https://localhost:%d/client-trailers", port), pr)
+	require.NoError(t, err)
+	req.Trailer = http.Header{
+		"Trailer1": nil,
+		"Trailer2": {"to-be-updated"},
+	}
+
+	go func() {
+		// send the first half of the body
+		pw.Write(PRData[:len(PRData)/2])
+		// then update the trailer values
+		req.Trailer.Set("Trailer1", "foo")
+		req.Trailer.Set("Trailer2", "bar")
+		req.Trailer.Set("Trailer3", "baz")
+		// send the rest of the body
+		pw.Write(PRData[len(PRData)/2:])
+		pw.Close()
+	}()
+
+	resp, err := newHTTP3Client(t).Do(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	select {
+	case trailersBefore := <-trailerChan:
+		// trailers before body should have announced keys with nil values
+		require.Equal(t, http.Header(map[string][]string{"Trailer1": nil, "Trailer2": nil}), trailersBefore)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for trailer announcement")
+	}
+
+	select {
+	case body := <-bodyChan:
+		require.Equal(t, string(PRData), body)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for body")
+	}
+
+	select {
+	case trailers := <-trailerChan:
+		require.Equal(t, http.Header(map[string][]string{
+			"Trailer1": {"foo"},
+			"Trailer2": {"bar"},
+			"Trailer3": {"baz"},
+		}), trailers)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for trailers")
+	}
+}
+
 func TestHTTPErrAbortHandler(t *testing.T) {
 	respChan := make(chan struct{})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/abort", func(w http.ResponseWriter, r *http.Request) {
 		// no recover here as it will interfere with the handler
-		w.Write([]byte("foobar"))
+		io.WriteString(w, "foobar")
 		w.(http.Flusher).Flush()
 		// wait for the client to receive the response
 		<-respChan
@@ -354,7 +571,13 @@ func TestHTTPDifferentOrigins(t *testing.T) {
 	})
 	port := startHTTPServer(t, mux)
 
-	cl := newHTTP3Client(t)
+	tr := &http3.Transport{
+		TLSClientConfig: getTLSClientConfigWithoutServerName(),
+		QUICConfig:      getQuicConfig(nil),
+	}
+	t.Cleanup(func() { tr.Close() })
+	cl := &http.Client{Transport: tr}
+
 	resp, err := cl.Get(fmt.Sprintf("https://localhost:%d/remote-addr", port))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -373,19 +596,36 @@ func TestHTTPServerIdleTimeout(t *testing.T) {
 	mux.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "Hello, World!\n")
 	})
-	port := startHTTPServer(t, mux, func(s *http3.Server) { s.IdleTimeout = 100 * time.Millisecond })
+	idleTimeout := scaleDuration(10 * time.Millisecond)
+	port := startHTTPServer(t, mux, func(s *http3.Server) { s.IdleTimeout = idleTimeout })
 
-	cl := newHTTP3Client(t)
+	connChan := make(chan *quic.Conn, 1)
+	tr := &http3.Transport{
+		TLSClientConfig: getTLSClientConfigWithoutServerName(),
+		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			conn, err := quic.DialAddrEarly(ctx, addr, tlsCfg, cfg)
+			connChan <- conn
+			return conn, err
+		},
+	}
+	t.Cleanup(func() { tr.Close() })
+	cl := &http.Client{Transport: tr}
+
 	_, err := cl.Get(fmt.Sprintf("https://localhost:%d/hello", port))
 	require.NoError(t, err)
 
-	time.Sleep(150 * time.Millisecond)
+	var conn *quic.Conn
+	select {
+	case conn = <-connChan:
+	case <-time.After(time.Second):
+		t.Fatal("connection was not opened")
+	}
 
-	_, err = cl.Get(fmt.Sprintf("https://localhost:%d/hello", port))
-	require.Error(t, err)
-	var appErr *quic.ApplicationError
-	require.ErrorAs(t, err, &appErr)
-	require.Equal(t, quic.ApplicationErrorCode(http3.ErrCodeNoError), appErr.ErrorCode)
+	select {
+	case <-time.After(3 * idleTimeout):
+		t.Fatal("connection was not closed")
+	case <-conn.Context().Done():
+	}
 }
 
 func TestHTTPReestablishConnectionAfterDialError(t *testing.T) {
@@ -396,14 +636,13 @@ func TestHTTPReestablishConnectionAfterDialError(t *testing.T) {
 	port := startHTTPServer(t, mux)
 
 	var dialCounter int
-	testErr := errors.New("test error")
 	cl := http.Client{
 		Transport: &http3.Transport{
 			TLSClientConfig: getTLSClientConfig(),
-			Dial: func(ctx context.Context, addr string, tlsConf *tls.Config, conf *quic.Config) (quic.EarlyConnection, error) {
+			Dial: func(ctx context.Context, addr string, tlsConf *tls.Config, conf *quic.Config) (*quic.Conn, error) {
 				dialCounter++
 				if dialCounter == 1 { // make the first dial fail
-					return nil, testErr
+					return nil, assert.AnError
 				}
 				return quic.DialAddrEarly(ctx, addr, tlsConf, conf)
 			},
@@ -412,7 +651,7 @@ func TestHTTPReestablishConnectionAfterDialError(t *testing.T) {
 	defer cl.Transport.(io.Closer).Close()
 
 	_, err := cl.Get(fmt.Sprintf("https://localhost:%d/hello", port))
-	require.ErrorIs(t, err, testErr)
+	require.ErrorIs(t, err, assert.AnError)
 	resp, err := cl.Get(fmt.Sprintf("https://localhost:%d/hello", port))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -442,7 +681,7 @@ func TestHTTPClientRequestContextCancellation(t *testing.T) {
 		mux.HandleFunc("/cancel-after", func(w http.ResponseWriter, r *http.Request) {
 			// TODO(#4508): check for request context cancellations
 			for {
-				if _, err := w.Write([]byte("foobar")); err != nil {
+				if _, err := io.WriteString(w, "foobar"); err != nil {
 					errChan <- err
 					return
 				}
@@ -495,7 +734,7 @@ func TestHTTPDeadlines(t *testing.T) {
 			require.NoError(t, rc.SetReadDeadline(time.Now().Add(deadlineDelay)))
 			body, err := io.ReadAll(r.Body)
 			resultChan <- result{body: body, err: err}
-			w.Write([]byte("ok"))
+			io.WriteString(w, "ok")
 		})
 
 		expectedEnd := time.Now().Add(deadlineDelay)
@@ -554,7 +793,7 @@ func TestHTTPDeadlines(t *testing.T) {
 func TestHTTPServeQUICConn(t *testing.T) {
 	tlsConf := getTLSConfig()
 	tlsConf.NextProtos = []string{http3.NextProtoH3}
-	ln, err := quic.Listen(newUPDConnLocalhost(t), tlsConf, getQuicConfig(nil))
+	ln, err := quic.Listen(newUDPConnLocalhost(t), tlsConf, getQuicConfig(nil))
 	require.NoError(t, err)
 	defer ln.Close()
 
@@ -593,11 +832,11 @@ func TestHTTPServeQUICConn(t *testing.T) {
 }
 
 func TestHTTPContextFromQUIC(t *testing.T) {
-	conn := newUPDConnLocalhost(t)
+	conn := newUDPConnLocalhost(t)
 	tr := &quic.Transport{
 		Conn: conn,
-		ConnContext: func(ctx context.Context) context.Context {
-			return context.WithValue(ctx, "foo", "bar") //nolint:staticcheck
+		ConnContext: func(ctx context.Context, _ *quic.ClientInfo) (context.Context, error) {
+			return context.WithValue(ctx, "foo", "bar"), nil
 		},
 	}
 	defer tr.Close()
@@ -648,9 +887,9 @@ func TestHTTPConnContext(t *testing.T) {
 		mux,
 		func(s *http3.Server) { server = s },
 		func(s *http3.Server) {
-			s.ConnContext = func(ctx context.Context, c quic.Connection) context.Context {
+			s.ConnContext = func(ctx context.Context, c *quic.Conn) context.Context {
 				connCtxChan <- ctx
-				ctx = context.WithValue(ctx, "foo", "bar") //nolint:staticcheck
+				ctx = context.WithValue(ctx, "foo", "bar")
 				return ctx
 			}
 		},
@@ -660,16 +899,11 @@ func TestHTTPConnContext(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	var tracingID quic.ConnectionTracingID
 	select {
 	case ctx := <-connCtxChan:
 		serv, ok := ctx.Value(http3.ServerContextKey).(*http3.Server)
 		require.True(t, ok)
 		require.Equal(t, server, serv)
-
-		id, ok := ctx.Value(quic.ConnectionTracingKey).(quic.ConnectionTracingID)
-		require.True(t, ok)
-		tracingID = id
 	default:
 		t.Fatal("handler was not called")
 	}
@@ -683,10 +917,6 @@ func TestHTTPConnContext(t *testing.T) {
 		serv, ok := ctx.Value(http3.ServerContextKey).(*http3.Server)
 		require.True(t, ok)
 		require.Equal(t, server, serv)
-
-		id, ok := ctx.Value(quic.ConnectionTracingKey).(quic.ConnectionTracingID)
-		require.True(t, ok)
-		require.Equal(t, tracingID, id)
 	default:
 		t.Fatal("handler was not called")
 	}
@@ -728,7 +958,7 @@ func TestHTTPStreamedRequests(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if _, err := w.Write([]byte(msg)); err != nil {
+			if _, err := io.WriteString(w, msg); err != nil {
 				errChan <- err
 				return
 			}
@@ -773,7 +1003,7 @@ func TestHTTP1xxResponse(t *testing.T) {
 		w.Header().Add("Link", header1)
 		w.Header().Add("Link", header2)
 		w.WriteHeader(http.StatusEarlyHints)
-		w.Write([]byte(data))
+		io.WriteString(w, data)
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -843,16 +1073,16 @@ func TestHTTP1xxTerminalResponse(t *testing.T) {
 func TestHTTP0RTT(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/0rtt", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(strconv.FormatBool(!r.TLS.HandshakeComplete)))
+		io.WriteString(w, strconv.FormatBool(!r.TLS.HandshakeComplete))
 	})
 	port := startHTTPServer(t, mux)
 
 	var num0RTTPackets atomic.Uint32
 	proxy := quicproxy.Proxy{
-		Conn:       newUPDConnLocalhost(t),
+		Conn:       newUDPConnLocalhost(t),
 		ServerAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port},
-		DelayPacket: func(_ quicproxy.Direction, data []byte) time.Duration {
-			if contains0RTTPacket(data) {
+		DelayPacket: func(_ quicproxy.Direction, _, _ net.Addr, data []byte) time.Duration {
+			if containsPacketType(data, protocol.PacketType0RTT) {
 				num0RTTPackets.Add(1)
 			}
 			return scaleDuration(25 * time.Millisecond)
@@ -870,6 +1100,7 @@ func TestHTTP0RTT(t *testing.T) {
 		DisableCompression: true,
 	}
 	defer tr.Close()
+	addDialCallback(t, tr)
 
 	proxyPort := proxy.LocalAddr().(*net.UDPAddr).Port
 	req, err := http.NewRequest(http3.MethodGet0RTT, fmt.Sprintf("https://localhost:%d/0rtt", proxyPort), nil)
@@ -894,6 +1125,7 @@ func TestHTTP0RTT(t *testing.T) {
 		DisableCompression: true,
 	}
 	defer tr2.Close()
+	addDialCallback(t, tr2)
 	rsp, err = tr2.RoundTrip(req)
 	require.NoError(t, err)
 	require.Equal(t, 200, rsp.StatusCode)
@@ -927,10 +1159,11 @@ func TestHTTPStreamer(t *testing.T) {
 	tlsConf.NextProtos = []string{http3.NextProtoH3}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	conn, err := quic.Dial(ctx, newUPDConnLocalhost(t), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}, tlsConf, getQuicConfig(nil))
+	conn, err := quic.Dial(ctx, newUDPConnLocalhost(t), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}, tlsConf, getQuicConfig(nil))
 	require.NoError(t, err)
 	defer conn.CloseWithError(0, "")
 	tr := http3.Transport{}
+	addDialCallback(t, &tr)
 	cc := tr.NewClientConn(conn)
 	str, err := cc.OpenRequestStream(ctx)
 	require.NoError(t, err)
@@ -951,4 +1184,243 @@ func TestHTTPStreamer(t *testing.T) {
 	repl, err := io.ReadAll(str)
 	require.NoError(t, err)
 	require.Equal(t, PRData, repl)
+}
+
+type blackHoleConn struct {
+	net.PacketConn
+	block atomic.Bool
+	close chan struct{}
+}
+
+func (c *blackHoleConn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	return c.PacketConn.WriteTo(b, addr)
+}
+
+func (c *blackHoleConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	if c.block.Load() {
+		<-c.close
+		return 0, nil, errors.New("blocked")
+	}
+	n, _, err := c.PacketConn.ReadFrom(b)
+	if c.block.Load() {
+		<-c.close
+		return 0, nil, errors.New("blocked")
+	}
+	return n, nil, err
+}
+
+func (c *blackHoleConn) Close() error {
+	close(c.close)
+	return c.PacketConn.Close()
+}
+
+func (c *blackHoleConn) StartBlocking() { c.block.Store(true) }
+
+func TestHTTPRequestRetryAfterIdleTimeout(t *testing.T) {
+	t.Run("only cached conn", func(t *testing.T) {
+		testHTTPRequestRetryAfterIdleTimeout(t, true)
+	})
+	t.Run("allow re-dialing", func(t *testing.T) {
+		testHTTPRequestRetryAfterIdleTimeout(t, false)
+	})
+}
+
+func testHTTPRequestRetryAfterIdleTimeout(t *testing.T, onlyCachedConn bool) {
+	t.Setenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING", "true")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/remote-addr", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, r.RemoteAddr)
+	})
+	port := startHTTPServer(t, mux, func(s *http3.Server) {})
+
+	firstConn := &blackHoleConn{PacketConn: newUDPConnLocalhost(t), close: make(chan struct{})}
+	secondConn := newUDPConnLocalhost(t)
+	conns := []net.PacketConn{firstConn, secondConn}
+	require.NotEqual(t, firstConn.LocalAddr().String(), secondConn.LocalAddr().String())
+
+	idleTimeout := scaleDuration(10 * time.Millisecond)
+	connChan := make(chan *quic.Conn, 2)
+	tr := &http3.Transport{
+		TLSClientConfig: getTLSClientConfigWithoutServerName(),
+		QUICConfig:      getQuicConfig(&quic.Config{MaxIdleTimeout: idleTimeout}),
+		Dial: func(ctx context.Context, a string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			conn := conns[0]
+			conns = conns[1:]
+			addr, err := net.ResolveUDPAddr("udp", a)
+			if err != nil {
+				return nil, err
+			}
+			c, err := quic.DialEarly(ctx, conn, addr, tlsCfg, cfg)
+			if err != nil {
+				return nil, err
+			}
+			connChan <- c
+			return c, nil
+		},
+		DisableCompression: true,
+	}
+	t.Cleanup(func() { tr.Close() })
+
+	var headersCount int
+	req, err := http.NewRequestWithContext(
+		httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+			WroteHeaders: func() { headersCount++ },
+		}),
+		http.MethodGet,
+		fmt.Sprintf("https://127.0.0.1:%d/remote-addr", port),
+		// Add a body (wrappped so that http.NewRequest doesn't set the GetBody callback),
+		// to make it impossible to retry this request.
+		// This tests that the detection logic works properly:
+		// If the request fails before the stream can be opened, it is always safe to retry.
+		io.LimitReader(strings.NewReader("foobar"), 1000),
+	)
+	require.NoError(t, err)
+
+	resp, err := tr.RoundTripOpt(req, http3.RoundTripOpt{})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, firstConn.LocalAddr().String(), string(body))
+
+	firstConn.StartBlocking()
+	// wait for the connection to time out
+	select {
+	case c := <-connChan:
+		select {
+		case <-c.Context().Done():
+		case <-time.After(time.Second):
+			t.Fatal("connection did not time out")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no connection was created")
+	}
+
+	// second request should succeed after re-dialing
+	resp, err = tr.RoundTripOpt(req, http3.RoundTripOpt{OnlyCachedConn: onlyCachedConn})
+	if onlyCachedConn {
+		require.EqualError(t, err, "http3: no cached connection was available")
+		require.Len(t, conns, 1) // no second dial attempt
+		require.Equal(t, 1, headersCount)
+		return
+	}
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err = io.ReadAll(&readerWithTimeout{Reader: resp.Body, Timeout: 2 * time.Second})
+	require.NoError(t, err)
+	require.Equal(t, secondConn.LocalAddr().String(), string(body))
+
+	require.Equal(t, 2, headersCount)
+	require.Empty(t, conns) // make sure we dialed 2 connections
+}
+
+func TestHTTPRequestAfterGracefulShutdown(t *testing.T) {
+	t.Run("Request.GetBody set", func(t *testing.T) {
+		testHTTPRequestAfterGracefulShutdown(t, true)
+	})
+	t.Run("Request.GetBody not set", func(t *testing.T) {
+		testHTTPRequestAfterGracefulShutdown(t, false)
+	})
+}
+
+func testHTTPRequestAfterGracefulShutdown(t *testing.T, setGetBody bool) {
+	t.Setenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING", "true")
+
+	ln, err := quic.ListenEarly(
+		newUDPConnLocalhost(t),
+		http3.ConfigureTLSConfig(getTLSConfig()),
+		getQuicConfig(nil),
+	)
+	require.NoError(t, err)
+
+	var inShutdown atomic.Bool
+	proxy := quicproxy.Proxy{
+		Conn:       newUDPConnLocalhost(t),
+		ServerAddr: ln.Addr().(*net.UDPAddr),
+		DelayPacket: func(_ quicproxy.Direction, _, _ net.Addr, data []byte) time.Duration {
+			if inShutdown.Load() {
+				return scaleDuration(10 * time.Millisecond)
+			}
+			return scaleDuration(2 * time.Millisecond)
+		},
+	}
+	require.NoError(t, proxy.Start())
+	defer proxy.Close()
+
+	mux2 := http.NewServeMux()
+	mux2.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		w.Write(data)
+	})
+	server2 := &http3.Server{Handler: mux2}
+
+	done := make(chan struct{})
+	defer close(done)
+	server1 := &http3.Server{Handler: http.NewServeMux()}
+
+	go server1.ServeListener(ln)
+
+	tlsConf := getTLSClientConfigWithoutServerName()
+	tlsConf.NextProtos = []string{http3.NextProtoH3}
+	var dialCount int
+	tr := &http3.Transport{
+		TLSClientConfig: tlsConf,
+		Dial: func(ctx context.Context, a string, tlsConf *tls.Config, conf *quic.Config) (*quic.Conn, error) {
+			addr, err := net.ResolveUDPAddr("udp", a)
+			if err != nil {
+				return nil, err
+			}
+			dialCount++
+			return quic.DialEarly(ctx, newUDPConnLocalhost(t), addr, tlsConf, conf)
+		},
+	}
+	t.Cleanup(func() { tr.Close() })
+	cl := &http.Client{Transport: tr}
+
+	// first request to establish the connection
+	resp, err := cl.Get(fmt.Sprintf("https://%s/", proxy.LocalAddr()))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	// If the body is a strings.Reader, http.NewRequest automatically sets the GetBody callback.
+	// This can be prevented by using a different kind of reader, e.g. the io.LimitReader.
+	var headersCount int
+	req, err := http.NewRequestWithContext(
+		httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+			WroteHeaders: func() { headersCount++ },
+		}),
+		http.MethodGet,
+		fmt.Sprintf("https://%s/echo", proxy.LocalAddr()),
+		io.LimitReader(strings.NewReader("foobar"), 1000),
+	)
+	require.NoError(t, err)
+	if setGetBody {
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader("foobaz")), nil
+		}
+	} else {
+		require.Nil(t, req.GetBody)
+	}
+
+	// By increasing the RTT, we make sure that the request is sent before the client receives the GOAWAY frame.
+	inShutdown.Store(true)
+	go server1.Shutdown(context.Background())
+	go server2.ServeListener(ln)
+	defer server2.Close()
+
+	resp, err = cl.Do(req)
+	if !setGetBody {
+		require.ErrorContains(t, err, "after Request.Body was written; define Request.GetBody to avoid this error")
+		require.Equal(t, 1, dialCount)
+		require.Equal(t, 1, headersCount)
+		return
+	}
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, "foobaz", string(body))
+	require.Equal(t, 2, dialCount)
+	require.Equal(t, 2, headersCount)
 }

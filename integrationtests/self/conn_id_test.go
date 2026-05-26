@@ -5,13 +5,13 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
-	mrand "math/rand"
+	mrand "math/rand/v2"
 	"testing"
 	"time"
 
-	quic "github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic"
 	"github.com/refraction-networking/uquic/internal/protocol"
-	"github.com/refraction-networking/uquic/logging"
+	"github.com/refraction-networking/uquic/qlogwriter"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,7 +33,7 @@ func (c *connIDGenerator) GenerateConnectionID() (quic.ConnectionID, error) {
 
 func (c *connIDGenerator) ConnectionIDLen() int { return c.Length }
 
-func randomConnIDLen() int { return 2 + int(mrand.Int31n(19)) }
+func randomConnIDLen() int { return 2 + mrand.IntN(19) }
 
 func TestConnectionIDsZeroLength(t *testing.T) {
 	testTransferWithConnectionIDs(t, randomConnIDLen(), 0, nil, nil)
@@ -71,7 +71,7 @@ func testTransferWithConnectionIDs(
 
 	// setup server
 	serverTr := &quic.Transport{
-		Conn:                  newUPDConnLocalhost(t),
+		Conn:                  newUDPConnLocalhost(t),
 		ConnectionIDLength:    serverConnIDLen,
 		ConnectionIDGenerator: serverConnIDGenerator,
 	}
@@ -81,7 +81,7 @@ func testTransferWithConnectionIDs(
 	ln, err := serverTr.Listen(
 		getTLSConfig(),
 		getQuicConfig(&quic.Config{
-			Tracer: func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer {
+			Tracer: func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace {
 				return serverTracer
 			},
 		}),
@@ -91,19 +91,17 @@ func testTransferWithConnectionIDs(
 	// setup client
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	var conn quic.Connection
+	var conn *quic.Conn
 	clientCounter, clientTracer := newPacketTracer()
 	clientQUICConf := getQuicConfig(&quic.Config{
-		Tracer: func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer {
-			return clientTracer
-		},
+		Tracer: func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return clientTracer },
 	})
 	if clientConnIDGenerator == nil && clientConnIDLen == 0 {
-		conn, err = quic.Dial(ctx, newUPDConnLocalhost(t), ln.Addr(), getTLSClientConfig(), clientQUICConf)
+		conn, err = quic.Dial(ctx, newUDPConnLocalhost(t), ln.Addr(), getTLSClientConfig(), clientQUICConf)
 		require.NoError(t, err)
 	} else {
 		clientTr := &quic.Transport{
-			Conn:                  newUPDConnLocalhost(t),
+			Conn:                  newUDPConnLocalhost(t),
 			ConnectionIDLength:    clientConnIDLen,
 			ConnectionIDGenerator: clientConnIDGenerator,
 		}

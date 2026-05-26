@@ -13,15 +13,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setupDeadlineTest(t *testing.T) (serverStr, clientStr quic.Stream) {
+func setupDeadlineTest(t *testing.T) (serverStr, clientStr *quic.Stream) {
 	t.Helper()
-	server, err := quic.Listen(newUPDConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
+	server, err := quic.Listen(newUDPConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 	t.Cleanup(func() { server.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	conn, err := quic.Dial(ctx, newUPDConnLocalhost(t), server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+	conn, err := quic.Dial(ctx, newUDPConnLocalhost(t), server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 	t.Cleanup(func() { conn.CloseWithError(0, "") })
 	clientStr, err = conn.OpenStream()

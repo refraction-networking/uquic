@@ -3,66 +3,37 @@ package self_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
-	mrand "math/rand"
+	mrand "math/rand/v2"
 	"net"
+	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	tls "github.com/refraction-networking/utls"
-
-	quic "github.com/refraction-networking/uquic"
-	quicproxy "github.com/refraction-networking/uquic/integrationtests/tools/proxy"
-	"github.com/refraction-networking/uquic/internal/wire"
-	"github.com/refraction-networking/uquic/quicvarint"
+	"github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic/internal/protocol"
+	"github.com/refraction-networking/uquic/internal/synctest"
+	"github.com/refraction-networking/uquic/qlog"
+	"github.com/refraction-networking/uquic/testutils/events"
+	"github.com/refraction-networking/uquic/testutils/simnet"
 
 	"github.com/stretchr/testify/require"
 )
 
-func startDropTestListenerAndProxy(t *testing.T, rtt, timeout time.Duration, dropCallback quicproxy.DropCallback, doRetry bool, longCertChain bool) (_ *quic.Listener, proxyAddr net.Addr) {
-	t.Helper()
-	conf := getQuicConfig(&quic.Config{
-		MaxIdleTimeout:          timeout,
-		HandshakeIdleTimeout:    timeout,
-		DisablePathMTUDiscovery: true,
-	})
-	var tlsConf *tls.Config
-	if longCertChain {
-		tlsConf = getTLSConfigWithLongCertChain()
-	} else {
-		tlsConf = getTLSConfig()
-	}
-	tr := &quic.Transport{
-		Conn:                newUPDConnLocalhost(t),
-		VerifySourceAddress: func(net.Addr) bool { return doRetry },
-	}
-	t.Cleanup(func() { tr.Close() })
-	ln, err := tr.Listen(tlsConf, conf)
-	require.NoError(t, err)
-	t.Cleanup(func() { ln.Close() })
-
-	proxy := quicproxy.Proxy{
-		Conn:        newUPDConnLocalhost(t),
-		ServerAddr:  ln.Addr().(*net.UDPAddr),
-		DropPacket:  dropCallback,
-		DelayPacket: func(quicproxy.Direction, []byte) time.Duration { return rtt / 2 },
-	}
-	require.NoError(t, proxy.Start())
-	t.Cleanup(func() { proxy.Close() })
-	return ln, proxy.LocalAddr()
-}
-
-func dropTestProtocolClientSpeaksFirst(t *testing.T, ln *quic.Listener, addr net.Addr, timeout time.Duration, data []byte) {
+func dropTestProtocolClientSpeaksFirst(t *testing.T, ln *quic.Listener, clientConn net.PacketConn, clientConf *tls.Config, timeout time.Duration, data []byte) *quic.Conn {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	conn, err := quic.Dial(
 		ctx,
-		newUPDConnLocalhost(t),
-		addr,
-		getTLSClientConfig(),
+		clientConn,
+		ln.Addr(),
+		clientConf,
 		getQuicConfig(&quic.Config{
 			MaxIdleTimeout:          timeout,
 			HandshakeIdleTimeout:    timeout,
@@ -89,16 +60,18 @@ func dropTestProtocolClientSpeaksFirst(t *testing.T, ln *quic.Listener, addr net
 	require.NoError(t, err)
 	require.Equal(t, b, data)
 	serverConn.CloseWithError(0, "")
+
+	return conn
 }
 
-func dropTestProtocolServerSpeaksFirst(t *testing.T, ln *quic.Listener, addr net.Addr, timeout time.Duration, data []byte) {
+func dropTestProtocolServerSpeaksFirst(t *testing.T, ln *quic.Listener, clientConn net.PacketConn, clientConf *tls.Config, timeout time.Duration, data []byte) *quic.Conn {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	conn, err := quic.Dial(
 		ctx,
-		newUPDConnLocalhost(t),
-		addr,
-		getTLSClientConfig(),
+		clientConn,
+		ln.Addr(),
+		clientConf,
 		getQuicConfig(&quic.Config{
 			MaxIdleTimeout:          timeout,
 			HandshakeIdleTimeout:    timeout,
@@ -147,16 +120,18 @@ func dropTestProtocolServerSpeaksFirst(t *testing.T, ln *quic.Listener, addr net
 	case <-time.After(timeout):
 		t.Fatal("server connection not closed")
 	}
+
+	return conn
 }
 
-func dropTestProtocolNobodySpeaks(t *testing.T, ln *quic.Listener, addr net.Addr, timeout time.Duration) {
+func dropTestProtocolNobodySpeaks(t *testing.T, ln *quic.Listener, clientConn net.PacketConn, clientConf *tls.Config, timeout time.Duration, _ []byte) *quic.Conn {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	conn, err := quic.Dial(
 		ctx,
-		newUPDConnLocalhost(t),
-		addr,
-		getTLSClientConfig(),
+		clientConn,
+		ln.Addr(),
+		clientConf,
 		getQuicConfig(&quic.Config{
 			MaxIdleTimeout:          timeout,
 			HandshakeIdleTimeout:    timeout,
@@ -169,52 +144,59 @@ func dropTestProtocolNobodySpeaks(t *testing.T, ln *quic.Listener, addr net.Addr
 	serverConn, err := ln.Accept(ctx)
 	require.NoError(t, err)
 	serverConn.CloseWithError(0, "")
+
+	return conn
 }
 
-func dropCallbackDropNthPacket(direction quicproxy.Direction, n int) quicproxy.DropCallback {
-	var incoming, outgoing atomic.Int32
-	return func(d quicproxy.Direction, packet []byte) bool {
-		var p int32
+func dropCallbackDropNthPacket(dir direction, ns ...int) func(direction, simnet.Packet) bool {
+	var toClient, toServer atomic.Int32
+	return func(d direction, p simnet.Packet) bool {
 		switch d {
-		case quicproxy.DirectionIncoming:
-			p = incoming.Add(1)
-		case quicproxy.DirectionOutgoing:
-			p = outgoing.Add(1)
+		case directionToClient:
+			c := toClient.Add(1)
+			if d == dir || dir == directionBoth {
+				return slices.Contains(ns, int(c))
+			}
+		case directionToServer:
+			c := toServer.Add(1)
+			if dir == d || dir == directionBoth {
+				return slices.Contains(ns, int(c))
+			}
 		}
-		return p == int32(n) && d.Is(direction)
+		return false
 	}
 }
 
-func dropCallbackDropOneThird(direction quicproxy.Direction) quicproxy.DropCallback {
+func dropCallbackDropOneThird(_ direction) func(direction, simnet.Packet) bool {
 	const maxSequentiallyDropped = 10
 	var mx sync.Mutex
-	var incoming, outgoing int
-	return func(d quicproxy.Direction, _ []byte) bool {
-		drop := mrand.Int63n(int64(3)) == 0
+	var toClient, toServer int
+	return func(d direction, p simnet.Packet) bool {
+		drop := mrand.IntN(3) == 0
 
 		mx.Lock()
 		defer mx.Unlock()
 		// never drop more than 10 consecutive packets
-		if d.Is(quicproxy.DirectionIncoming) {
+		if d == directionToClient || d == directionBoth {
 			if drop {
-				incoming++
-				if incoming > maxSequentiallyDropped {
+				toClient++
+				if toClient > maxSequentiallyDropped {
 					drop = false
 				}
 			}
 			if !drop {
-				incoming = 0
+				toClient = 0
 			}
 		}
-		if d.Is(quicproxy.DirectionOutgoing) {
+		if d == directionToServer || d == directionBoth {
 			if drop {
-				outgoing++
-				if outgoing > maxSequentiallyDropped {
+				toServer++
+				if toServer > maxSequentiallyDropped {
 					drop = false
 				}
 			}
 			if !drop {
-				outgoing = 0
+				toServer = 0
 			}
 		}
 		return drop
@@ -226,61 +208,208 @@ func TestHandshakeWithPacketLoss(t *testing.T) {
 	const timeout = 2 * time.Minute
 	const rtt = 20 * time.Millisecond
 
-	type dropPattern struct {
-		name string
-		fn   quicproxy.DropCallback
-	}
+	type dropPattern string
 
-	type serverConfig struct {
+	const (
+		dropPatternDrop1stPacket         dropPattern = "drop 1st packet"
+		dropPatternDropFirst3Packets     dropPattern = "drop first 3 packets"
+		dropPatternDropOneThirdOfPackets dropPattern = "drop 1/3 of packets"
+	)
+
+	type testConfig struct {
+		postQuantum   bool
 		longCertChain bool
 		doRetry       bool
 	}
 
-	for _, direction := range []quicproxy.Direction{quicproxy.DirectionIncoming, quicproxy.DirectionOutgoing, quicproxy.DirectionBoth} {
-		for _, dropPattern := range []dropPattern{
-			{name: "drop 1st packet", fn: dropCallbackDropNthPacket(direction, 1)},
-			{name: "drop 2nd packet", fn: dropCallbackDropNthPacket(direction, 2)},
-			{name: "drop 1/3 of packets", fn: dropCallbackDropOneThird(direction)},
+	for _, dir := range []direction{directionToClient, directionToServer, directionBoth} {
+		for _, pattern := range []dropPattern{
+			dropPatternDrop1stPacket,
+			dropPatternDropFirst3Packets,
+			dropPatternDropOneThirdOfPackets,
 		} {
-			t.Run(fmt.Sprintf("%s in %s direction", dropPattern.name, direction), func(t *testing.T) {
-				for _, conf := range []serverConfig{
-					{longCertChain: false, doRetry: true},
-					{longCertChain: false, doRetry: false},
-					{longCertChain: true, doRetry: false},
+			t.Run(fmt.Sprintf("%s in direction %s", pattern, dir), func(t *testing.T) {
+				for _, conf := range []testConfig{
+					{postQuantum: false, longCertChain: false, doRetry: true},
+					{postQuantum: false, longCertChain: false, doRetry: false},
+					{postQuantum: false, longCertChain: true, doRetry: false},
+					{postQuantum: true, longCertChain: false, doRetry: false},
+					{postQuantum: true, longCertChain: true, doRetry: false},
 				} {
-					t.Run(fmt.Sprintf("retry: %t", conf.doRetry), func(t *testing.T) {
-						t.Run("client speaks first", func(t *testing.T) {
-							ln, proxyAddr := startDropTestListenerAndProxy(t, rtt, timeout, dropPattern.fn, conf.doRetry, conf.longCertChain)
-							dropTestProtocolClientSpeaksFirst(t, ln, proxyAddr, timeout, data)
-						})
+					for _, test := range []struct {
+						name string
+						fn   func(t *testing.T, ln *quic.Listener, clientConn net.PacketConn, clientConf *tls.Config, timeout time.Duration, data []byte) *quic.Conn
+					}{
+						{"client speaks first", dropTestProtocolClientSpeaksFirst},
+						{"server speaks first", dropTestProtocolServerSpeaksFirst},
+						{"nobody speaks", dropTestProtocolNobodySpeaks},
+					} {
+						t.Run(fmt.Sprintf("retry: %t/%s", conf.doRetry, test.name), func(t *testing.T) {
+							synctest.Test(t, func(t *testing.T) {
+								clientAddr := &net.UDPAddr{IP: net.ParseIP("1.0.0.1"), Port: 9001}
+								serverAddr := &net.UDPAddr{IP: net.ParseIP("1.0.0.2"), Port: 9002}
+								var fn func(direction, simnet.Packet) bool
+								switch pattern {
+								case dropPatternDrop1stPacket:
+									fn = dropCallbackDropNthPacket(dir, 1)
+								case dropPatternDropFirst3Packets:
+									fn = dropCallbackDropNthPacket(dir, 1, 2, 3)
+								case dropPatternDropOneThirdOfPackets:
+									fn = dropCallbackDropOneThird(dir)
+								}
+								var numDropped atomic.Int32
+								n := &simnet.Simnet{
+									Router: &directionAwareDroppingRouter{
+										ClientAddr: clientAddr,
+										ServerAddr: serverAddr,
+										Drop: func(d direction, p simnet.Packet) bool {
+											drop := fn(d, p)
+											if drop {
+												numDropped.Add(1)
+											}
+											return drop
+										},
+									},
+								}
+								settings := simnet.NodeBiDiLinkSettings{Latency: rtt / 2}
+								clientConn := n.NewEndpoint(clientAddr, settings)
+								defer clientConn.Close()
+								serverConn := n.NewEndpoint(serverAddr, settings)
+								defer serverConn.Close()
+								require.NoError(t, n.Start())
+								defer n.Close()
 
-						t.Run("server speaks first", func(t *testing.T) {
-							ln, proxyAddr := startDropTestListenerAndProxy(t, rtt, timeout, dropPattern.fn, conf.doRetry, conf.longCertChain)
-							dropTestProtocolServerSpeaksFirst(t, ln, proxyAddr, timeout, data)
-						})
+								var tlsConf *tls.Config
+								if conf.longCertChain {
+									tlsConf = getTLSConfigWithLongCertChain()
+								} else {
+									tlsConf = getTLSConfig()
+								}
+								clientConf := getTLSClientConfig()
+								if !conf.postQuantum {
+									clientConf.CurvePreferences = []tls.CurveID{tls.CurveP384}
+								}
 
-						t.Run("nobody speaks", func(t *testing.T) {
-							ln, proxyAddr := startDropTestListenerAndProxy(t, rtt, timeout, dropPattern.fn, conf.doRetry, conf.longCertChain)
-							dropTestProtocolNobodySpeaks(t, ln, proxyAddr, timeout)
+								tr := &quic.Transport{
+									Conn:                serverConn,
+									VerifySourceAddress: func(net.Addr) bool { return conf.doRetry },
+								}
+								defer tr.Close()
+
+								ln, err := tr.Listen(
+									tlsConf,
+									getQuicConfig(&quic.Config{
+										MaxIdleTimeout:          timeout,
+										HandshakeIdleTimeout:    timeout,
+										DisablePathMTUDiscovery: true,
+									}),
+								)
+								require.NoError(t, err)
+								defer ln.Close()
+
+								conn := test.fn(t, ln, clientConn, clientConf, timeout, data)
+								if !strings.HasPrefix(runtime.Version(), "go1.24") {
+									curveID := getCurveID(conn.ConnectionState().TLS)
+									if conf.postQuantum {
+										require.Equal(t, tls.X25519MLKEM768, curveID)
+									} else {
+										require.Equal(t, tls.CurveP384, curveID)
+									}
+								}
+
+								if pattern != dropPatternDropOneThirdOfPackets {
+									require.NotZero(t, numDropped.Load())
+								}
+								t.Logf("dropped %d packets", numDropped.Load())
+							})
 						})
-					})
+					}
 				}
 			})
 		}
 	}
 }
 
-func TestPostQuantumClientHello(t *testing.T) {
-	origAdditionalTransportParametersClient := wire.AdditionalTransportParametersClient
-	t.Cleanup(func() { wire.AdditionalTransportParametersClient = origAdditionalTransportParametersClient })
+func TestHandshakePacketBuffering(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const rtt = 20 * time.Millisecond
 
-	b := make([]byte, 2500) // the ClientHello will now span across 3 packets
-	mrand.New(mrand.NewSource(time.Now().UnixNano())).Read(b)
-	wire.AdditionalTransportParametersClient = map[uint64][]byte{
-		// Avoid random collisions with the greased transport parameters.
-		uint64(27+31*(1000+mrand.Int63()/31)) % quicvarint.Max: b,
-	}
+		clientAddr := &net.UDPAddr{IP: net.ParseIP("1.0.0.1"), Port: 9001}
+		serverAddr := &net.UDPAddr{IP: net.ParseIP("1.0.0.2"), Port: 9002}
+		var droppedFirst atomic.Bool
+		n := &simnet.Simnet{
+			Router: &directionAwareDroppingRouter{
+				ClientAddr: clientAddr,
+				ServerAddr: serverAddr,
+				Drop: func(d direction, p simnet.Packet) bool {
+					if droppedFirst.Load() {
+						return false
+					}
+					if d == directionToClient && containsPacketType(p.Data, protocol.PacketTypeInitial) {
+						droppedFirst.Store(true)
+						return true
+					}
+					return false
+				},
+			},
+		}
+		settings := simnet.NodeBiDiLinkSettings{Latency: rtt / 2}
+		clientConn := n.NewEndpoint(clientAddr, settings)
+		defer clientConn.Close()
+		serverConn := n.NewEndpoint(serverAddr, settings)
+		defer serverConn.Close()
+		require.NoError(t, n.Start())
+		defer n.Close()
 
-	ln, proxyPort := startDropTestListenerAndProxy(t, 10*time.Millisecond, 20*time.Second, dropCallbackDropOneThird(quicproxy.DirectionIncoming), false, false)
-	dropTestProtocolClientSpeaksFirst(t, ln, proxyPort, time.Minute, GeneratePRData(5000))
+		var serverEventRecorder events.Recorder
+		ln, err := quic.Listen(
+			serverConn,
+			getTLSConfig(),
+			getQuicConfig(&quic.Config{Tracer: newTracer(&serverEventRecorder)}),
+		)
+		require.NoError(t, err)
+		defer ln.Close()
+
+		var clientEventRecorder events.Recorder
+		conn, err := quic.Dial(
+			context.Background(),
+			clientConn,
+			ln.Addr(),
+			getTLSClientConfig(),
+			getQuicConfig(&quic.Config{Tracer: newTracer(&clientEventRecorder)}),
+		)
+		require.NoError(t, err)
+		defer conn.CloseWithError(0, "")
+		str, err := conn.OpenUniStream()
+		require.NoError(t, err)
+		data := []byte("foobar")
+		_, err = str.Write(data)
+		require.NoError(t, err)
+		require.NoError(t, str.Close())
+
+		require.Empty(t, serverEventRecorder.Events(qlog.PacketBuffered{}))
+		buffered := clientEventRecorder.Events(qlog.PacketBuffered{})
+		t.Logf("buffered packets: %d", len(buffered))
+		require.NotEmpty(t, buffered)
+		receivedPackets := make(map[qlog.DatagramID][]qlog.PacketType)
+		for _, ev := range clientEventRecorder.Events(qlog.PacketReceived{}) {
+			id := ev.(qlog.PacketReceived).DatagramID
+			receivedPackets[id] = append(receivedPackets[id], ev.(qlog.PacketReceived).Header.PacketType)
+		}
+		for _, ev := range buffered {
+			id := ev.(qlog.PacketBuffered).DatagramID
+			require.Contains(t, receivedPackets, id)
+			require.Contains(t, receivedPackets[id], qlog.PacketTypeHandshake)
+		}
+
+		sconn, err := ln.Accept(context.Background())
+		require.NoError(t, err)
+		defer sconn.CloseWithError(0, "")
+		sstr, err := sconn.AcceptUniStream(context.Background())
+		require.NoError(t, err)
+		b, err := io.ReadAll(sstr)
+		require.NoError(t, err)
+		require.Equal(t, data, b)
+		require.Equal(t, rtt, sconn.ConnectionStats().SmoothedRTT)
+	})
 }

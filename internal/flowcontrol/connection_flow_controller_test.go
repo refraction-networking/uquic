@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/refraction-networking/uquic/internal/monotime"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/qerr"
 	"github.com/refraction-networking/uquic/internal/utils"
@@ -16,18 +17,18 @@ func TestConnectionFlowControlWindowUpdate(t *testing.T) {
 		100, // initial receive window
 		100, // max receive window
 		nil,
-		&utils.RTTStats{},
+		utils.NewRTTStats(),
 		utils.DefaultLogger,
 	)
 	require.False(t, fc.AddBytesRead(1))
-	require.Zero(t, fc.GetWindowUpdate(time.Now()))
+	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
 	require.True(t, fc.AddBytesRead(99))
-	require.Equal(t, protocol.ByteCount(200), fc.GetWindowUpdate(time.Now()))
+	require.Equal(t, protocol.ByteCount(200), fc.GetWindowUpdate(monotime.Now()))
 }
 
 func TestConnectionWindowAutoTuningNotAllowed(t *testing.T) {
 	// the RTT is 1 second
-	rttStats := &utils.RTTStats{}
+	rttStats := utils.NewRTTStats()
 	rttStats.UpdateRTT(time.Second, 0)
 	require.Equal(t, time.Second, rttStats.SmoothedRTT())
 
@@ -42,7 +43,7 @@ func TestConnectionWindowAutoTuningNotAllowed(t *testing.T) {
 		rttStats,
 		utils.DefaultLogger,
 	)
-	now := time.Now()
+	now := monotime.Now()
 	require.NoError(t, fc.IncrementHighestReceived(100, now))
 	fc.AddBytesRead(90)
 	require.Equal(t, protocol.InvalidByteCount, callbackCalledWith)
@@ -51,17 +52,17 @@ func TestConnectionWindowAutoTuningNotAllowed(t *testing.T) {
 }
 
 func TestConnectionFlowControlViolation(t *testing.T) {
-	fc := NewConnectionFlowController(100, 100, nil, &utils.RTTStats{}, utils.DefaultLogger)
-	require.NoError(t, fc.IncrementHighestReceived(40, time.Now()))
-	require.NoError(t, fc.IncrementHighestReceived(60, time.Now()))
-	err := fc.IncrementHighestReceived(1, time.Now())
+	fc := NewConnectionFlowController(100, 100, nil, utils.NewRTTStats(), utils.DefaultLogger)
+	require.NoError(t, fc.IncrementHighestReceived(40, monotime.Now()))
+	require.NoError(t, fc.IncrementHighestReceived(60, monotime.Now()))
+	err := fc.IncrementHighestReceived(1, monotime.Now())
 	var terr *qerr.TransportError
 	require.ErrorAs(t, err, &terr)
 	require.Equal(t, qerr.FlowControlError, terr.ErrorCode)
 }
 
 func TestConnectionFlowControllerReset(t *testing.T) {
-	fc := NewConnectionFlowController(0, 0, nil, &utils.RTTStats{}, utils.DefaultLogger)
+	fc := NewConnectionFlowController(0, 0, nil, utils.NewRTTStats(), utils.DefaultLogger)
 	fc.UpdateSendWindow(100)
 	fc.AddBytesSent(10)
 	require.Equal(t, protocol.ByteCount(90), fc.SendWindowSize())
@@ -70,7 +71,7 @@ func TestConnectionFlowControllerReset(t *testing.T) {
 }
 
 func TestConnectionFlowControllerResetAfterReading(t *testing.T) {
-	fc := NewConnectionFlowController(0, 0, nil, &utils.RTTStats{}, utils.DefaultLogger)
+	fc := NewConnectionFlowController(0, 0, nil, utils.NewRTTStats(), utils.DefaultLogger)
 	fc.AddBytesRead(1)
 	require.EqualError(t, fc.Reset(), "flow controller reset after reading data")
 }

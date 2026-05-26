@@ -9,10 +9,11 @@ import (
 	"testing"
 	"time"
 
-	quic "github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic"
 	quicproxy "github.com/refraction-networking/uquic/integrationtests/tools/proxy"
 	"github.com/refraction-networking/uquic/internal/protocol"
-	"github.com/refraction-networking/uquic/logging"
+	"github.com/refraction-networking/uquic/qlog"
+	"github.com/refraction-networking/uquic/qlogwriter"
 	"github.com/refraction-networking/uquic/quicvarint"
 
 	"github.com/stretchr/testify/assert"
@@ -24,20 +25,20 @@ func TestACKBundling(t *testing.T) {
 
 	serverCounter, serverTracer := newPacketTracer()
 	server, err := quic.Listen(
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		getTLSConfig(),
 		getQuicConfig(&quic.Config{
 			DisablePathMTUDiscovery: true,
-			Tracer:                  newTracer(serverTracer),
+			Tracer:                  func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return serverTracer },
 		}),
 	)
 	require.NoError(t, err)
 	defer server.Close()
 
 	proxy := quicproxy.Proxy{
-		Conn:       newUPDConnLocalhost(t),
+		Conn:       newUDPConnLocalhost(t),
 		ServerAddr: server.Addr().(*net.UDPAddr),
-		DelayPacket: func(_ quicproxy.Direction, _ []byte) time.Duration {
+		DelayPacket: func(quicproxy.Direction, net.Addr, net.Addr, []byte) time.Duration {
 			return 5 * time.Millisecond
 		},
 	}
@@ -49,12 +50,12 @@ func TestACKBundling(t *testing.T) {
 	defer cancel()
 	conn, err := quic.Dial(
 		ctx,
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		proxy.LocalAddr(),
 		getTLSClientConfig(),
 		getQuicConfig(&quic.Config{
 			DisablePathMTUDiscovery: true,
-			Tracer:                  newTracer(clientTracer),
+			Tracer:                  func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return clientTracer },
 		}),
 	)
 	require.NoError(t, err)
@@ -101,14 +102,14 @@ func TestACKBundling(t *testing.T) {
 	require.NoError(t, conn.CloseWithError(0, ""))
 	require.NoError(t, <-serverErrChan)
 
-	countBundledPackets := func(packets []shortHeaderPacket) (numBundled int) {
+	countBundledPackets := func(packets []packet) (numBundled int) {
 		for _, p := range packets {
 			var hasAck, hasStreamFrame bool
 			for _, f := range p.frames {
-				switch f.(type) {
-				case *logging.AckFrame:
+				switch f.Frame.(type) {
+				case *qlog.AckFrame:
 					hasAck = true
-				case *logging.StreamFrame:
+				case *qlog.StreamFrame:
 					hasStreamFrame = true
 				}
 			}
@@ -153,7 +154,7 @@ func testConnAndStreamDataBlocked(t *testing.T, limitStream, limitConn bool) {
 	rtt := scaleDuration(5 * time.Millisecond)
 
 	ln, err := quic.Listen(
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		getTLSConfig(),
 		getQuicConfig(&quic.Config{
 			InitialStreamReceiveWindow:     initialStreamWindow,
@@ -164,9 +165,9 @@ func testConnAndStreamDataBlocked(t *testing.T, limitStream, limitConn bool) {
 	defer ln.Close()
 
 	proxy := quicproxy.Proxy{
-		Conn:       newUPDConnLocalhost(t),
+		Conn:       newUDPConnLocalhost(t),
 		ServerAddr: ln.Addr().(*net.UDPAddr),
-		DelayPacket: func(_ quicproxy.Direction, _ []byte) time.Duration {
+		DelayPacket: func(quicproxy.Direction, net.Addr, net.Addr, []byte) time.Duration {
 			return rtt / 2
 		},
 	}
@@ -178,13 +179,11 @@ func testConnAndStreamDataBlocked(t *testing.T, limitStream, limitConn bool) {
 	defer cancel()
 	conn, err := quic.Dial(
 		ctx,
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		proxy.LocalAddr(),
 		getTLSClientConfig(),
 		getQuicConfig(&quic.Config{
-			Tracer: func(context.Context, logging.Perspective, quic.ConnectionID) *logging.ConnectionTracer {
-				return tracer
-			},
+			Tracer: func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return tracer },
 		}),
 	)
 	require.NoError(t, err)
@@ -198,12 +197,12 @@ func testConnAndStreamDataBlocked(t *testing.T, limitStream, limitConn bool) {
 	// Stream data is consumed (almost) immediately, so flow-control window auto-tuning kicks in.
 	// The window size is doubled for every batch.
 	var windowSizes []protocol.ByteCount
-	for i := 0; i < numBatches; i++ {
+	for i := range numBatches {
 		windowSizes = append(windowSizes, window<<i)
 	}
 
-	var serverStr quic.ReceiveStream
-	for i := 0; i < numBatches; i++ {
+	var serverStr *quic.ReceiveStream
+	for i := range numBatches {
 		str.SetWriteDeadline(time.Now().Add(rtt))
 		n, err := str.Write(make([]byte, 10000))
 		require.Error(t, err)
@@ -224,22 +223,22 @@ func testConnAndStreamDataBlocked(t *testing.T, limitStream, limitConn bool) {
 	conn.CloseWithError(0, "")
 	serverConn.CloseWithError(0, "")
 
-	var streamDataBlockedFrames []logging.StreamDataBlockedFrame
-	var dataBlockedFrames []logging.DataBlockedFrame
+	var streamDataBlockedFrames []qlog.StreamDataBlockedFrame
+	var dataBlockedFrames []qlog.DataBlockedFrame
 	var bundledCounter int
 	for _, p := range counter.getSentShortHeaderPackets() {
 		blockedOffset := protocol.InvalidByteCount
 		for _, f := range p.frames {
-			switch frame := f.(type) {
-			case *logging.StreamDataBlockedFrame:
+			switch frame := f.Frame.(type) {
+			case *qlog.StreamDataBlockedFrame:
 				streamDataBlockedFrames = append(streamDataBlockedFrames, *frame)
 				blockedOffset = frame.MaximumStreamData
-			case *logging.DataBlockedFrame:
+			case *qlog.DataBlockedFrame:
 				dataBlockedFrames = append(dataBlockedFrames, *frame)
 				blockedOffset = frame.MaximumData
-			case *logging.StreamFrame:
+			case *qlog.StreamFrame:
 				// the STREAM frame is always packed last
-				if frame.Offset+frame.Length == blockedOffset {
+				if frame.Offset+frame.Length == int64(blockedOffset) {
 					bundledCounter++
 				}
 			}

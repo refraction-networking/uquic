@@ -1,10 +1,10 @@
 package wire
 
 import (
+	"crypto/rand"
 	"encoding/binary"
+	mrand "math/rand/v2"
 	"testing"
-
-	"golang.org/x/exp/rand"
 
 	"github.com/refraction-networking/uquic/internal/protocol"
 
@@ -19,8 +19,8 @@ func TestParseVersionNegotiationPacket(t *testing.T) {
 		return b
 	}
 
-	srcConnID := randConnID(rand.Intn(255) + 1)
-	destConnID := randConnID(rand.Intn(255) + 1)
+	srcConnID := randConnID(mrand.IntN(255) + 1)
+	destConnID := randConnID(mrand.IntN(255) + 1)
 	versions := []protocol.Version{0x22334455, 0x33445566}
 	data := []byte{0x80, 0, 0, 0, 0}
 	data = append(data, uint8(len(destConnID)))
@@ -92,10 +92,12 @@ versionLoop:
 
 func BenchmarkComposeVersionNegotiationPacket(b *testing.B) {
 	b.ReportAllocs()
+
 	supportedVersions := []protocol.Version{protocol.Version2, protocol.Version1, 0x1337}
 	destConnID := protocol.ArbitraryLenConnectionID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0xa, 0xb, 0xc, 0xd}
 	srcConnID := protocol.ArbitraryLenConnectionID{10, 9, 8, 7, 6, 5, 4, 3, 2, 1}
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		ComposeVersionNegotiation(destConnID, srcConnID, supportedVersions)
 	}
 }

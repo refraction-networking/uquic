@@ -48,10 +48,9 @@ func TestHTTPSettings(t *testing.T) {
 	})
 
 	t.Run("client settings", func(t *testing.T) {
-		connChan := make(chan http3.Connection, 1)
+		connChan := make(chan http3.Settingser, 1)
 		mux.HandleFunc("/settings", func(w http.ResponseWriter, r *http.Request) {
-			conn := w.(http3.Hijacker).Connection()
-			connChan <- conn
+			connChan <- w.(http3.Settingser)
 			w.WriteHeader(http.StatusOK)
 		})
 
@@ -70,7 +69,7 @@ func TestHTTPSettings(t *testing.T) {
 
 		_, err = tr.RoundTrip(req)
 		require.NoError(t, err)
-		var conn http3.Connection
+		var conn http3.Settingser
 		select {
 		case conn = <-connChan:
 		case <-time.After(time.Second):
@@ -90,7 +89,7 @@ func TestHTTPSettings(t *testing.T) {
 	})
 }
 
-func dialAndOpenHTTPDatagramStream(t *testing.T, addr string) http3.RequestStream {
+func dialAndOpenHTTPDatagramStream(t *testing.T, addr string) *http3.RequestStream {
 	t.Helper()
 
 	u, err := url.Parse(addr)
@@ -134,14 +133,14 @@ func TestHTTPDatagrams(t *testing.T) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		conn := w.(http3.Hijacker).Connection()
+		s := w.(http3.Settingser)
 		select {
-		case <-conn.ReceivedSettings():
+		case <-s.ReceivedSettings():
 		case <-time.After(time.Second):
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if !conn.Settings().EnableDatagrams {
+		if !s.Settings().EnableDatagrams {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -162,7 +161,7 @@ func TestHTTPDatagrams(t *testing.T) {
 	port := startHTTPServer(t, mux, func(s *http3.Server) { s.EnableDatagrams = true })
 	str := dialAndOpenHTTPDatagramStream(t, fmt.Sprintf("https://localhost:%d/datagrams", port))
 
-	for i := 0; i < num; i++ {
+	for i := range num {
 		b := make([]byte, 8)
 		binary.BigEndian.PutUint64(b, uint64(i))
 		require.NoError(t, str.SendDatagram(bytes.Repeat(b, 100)))
@@ -178,6 +177,8 @@ loop:
 			}
 		case err := <-errChan:
 			t.Fatalf("receiving datagrams failed: %s", err)
+		case <-time.After(time.Second):
+			t.Fatal("timeout")
 		}
 	}
 	str.CancelWrite(42)
@@ -197,14 +198,14 @@ func TestHTTPDatagramClose(t *testing.T) {
 	datagramChan := make(chan []byte, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/datagrams", func(w http.ResponseWriter, r *http.Request) {
-		conn := w.(http3.Hijacker).Connection()
+		s := w.(http3.Settingser)
 		select {
-		case <-conn.ReceivedSettings():
+		case <-s.ReceivedSettings():
 		case <-time.After(time.Second):
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if !conn.Settings().EnableDatagrams {
+		if !s.Settings().EnableDatagrams {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -254,14 +255,14 @@ func TestHTTPDatagramStreamReset(t *testing.T) {
 	datagramChan := make(chan []byte, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/datagrams", func(w http.ResponseWriter, r *http.Request) {
-		conn := w.(http3.Hijacker).Connection()
+		s := w.(http3.Settingser)
 		select {
-		case <-conn.ReceivedSettings():
+		case <-s.ReceivedSettings():
 		case <-time.After(time.Second):
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if !conn.Settings().EnableDatagrams {
+		if !s.Settings().EnableDatagrams {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}

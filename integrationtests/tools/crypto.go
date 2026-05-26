@@ -4,24 +4,28 @@ import (
 	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"math/big"
 	"net"
 	"time"
-
-	tls "github.com/refraction-networking/utls"
 )
 
 const ALPN = "quic-go integration tests"
+
+// use a very long validity period to cover the synthetic clock used in synctest
+var (
+	notBefore = time.Date(1990, 1, 1, 0, 0, 0, 0, time.UTC)
+	notAfter  = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+)
 
 func GenerateCA() (*x509.Certificate, crypto.PrivateKey, error) {
 	certTempl := &x509.Certificate{
 		SerialNumber:          big.NewInt(2019),
 		Subject:               pkix.Name{},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(24 * time.Hour),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		IsCA:                  true,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
@@ -47,8 +51,8 @@ func GenerateLeafCert(ca *x509.Certificate, caPriv crypto.PrivateKey) (*x509.Cer
 		SerialNumber: big.NewInt(1),
 		DNSNames:     []string{"localhost"},
 		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(24 * time.Hour),
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 	}
@@ -70,12 +74,12 @@ func GenerateLeafCert(ca *x509.Certificate, caPriv crypto.PrivateKey) (*x509.Cer
 // GenerateTLSConfigWithLongCertChain generates a tls.Config that uses a long certificate chain.
 // The Root CA used is the same as for the config returned from getTLSConfig().
 func GenerateTLSConfigWithLongCertChain(ca *x509.Certificate, caPrivateKey crypto.PrivateKey) (*tls.Config, error) {
-	const chainLen = 7
+	const chainLen = 16
 	certTempl := &x509.Certificate{
 		SerialNumber:          big.NewInt(2019),
 		Subject:               pkix.Name{},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(24 * time.Hour),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		IsCA:                  true,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
@@ -84,13 +88,13 @@ func GenerateTLSConfigWithLongCertChain(ca *x509.Certificate, caPrivateKey crypt
 
 	lastCA := ca
 	lastCAPrivKey := caPrivateKey
-	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
 	certs := make([]*x509.Certificate, chainLen)
-	for i := 0; i < chainLen; i++ {
-		caBytes, err := x509.CreateCertificate(rand.Reader, certTempl, lastCA, &privKey.PublicKey, lastCAPrivKey)
+	for i := range chainLen {
+		caBytes, err := x509.CreateCertificate(rand.Reader, certTempl, lastCA, priv.Public(), lastCAPrivKey)
 		if err != nil {
 			return nil, err
 		}
@@ -100,7 +104,7 @@ func GenerateTLSConfigWithLongCertChain(ca *x509.Certificate, caPrivateKey crypt
 		}
 		certs[i] = ca
 		lastCA = ca
-		lastCAPrivKey = privKey
+		lastCAPrivKey = priv
 	}
 	leafCert, leafPrivateKey, err := GenerateLeafCert(lastCA, lastCAPrivKey)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/refraction-networking/uquic/internal/monotime"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/qerr"
 	"github.com/refraction-networking/uquic/internal/utils"
@@ -18,25 +19,25 @@ func TestStreamFlowControlReceiving(t *testing.T) {
 			protocol.MaxByteCount,
 			protocol.MaxByteCount,
 			nil,
-			&utils.RTTStats{},
+			utils.NewRTTStats(),
 			utils.DefaultLogger,
 		),
 		100,
 		protocol.MaxByteCount,
 		protocol.MaxByteCount,
-		&utils.RTTStats{},
+		utils.NewRTTStats(),
 		utils.DefaultLogger,
 	)
 
-	require.NoError(t, fc.UpdateHighestReceived(50, false, time.Now()))
+	require.NoError(t, fc.UpdateHighestReceived(50, false, monotime.Now()))
 	// duplicates are fine
-	require.NoError(t, fc.UpdateHighestReceived(50, false, time.Now()))
+	require.NoError(t, fc.UpdateHighestReceived(50, false, monotime.Now()))
 	// reordering is fine
-	require.NoError(t, fc.UpdateHighestReceived(40, false, time.Now()))
-	require.NoError(t, fc.UpdateHighestReceived(60, false, time.Now()))
+	require.NoError(t, fc.UpdateHighestReceived(40, false, monotime.Now()))
+	require.NoError(t, fc.UpdateHighestReceived(60, false, monotime.Now()))
 
 	// exceeding the limit is not fine
-	err := fc.UpdateHighestReceived(101, false, time.Now())
+	err := fc.UpdateHighestReceived(101, false, monotime.Now())
 	var terr *qerr.TransportError
 	require.ErrorAs(t, err, &terr)
 	require.Equal(t, qerr.FlowControlError, terr.ErrorCode)
@@ -51,28 +52,28 @@ func TestStreamFlowControllerFinalOffset(t *testing.T) {
 				protocol.MaxByteCount,
 				protocol.MaxByteCount,
 				nil,
-				&utils.RTTStats{},
+				utils.NewRTTStats(),
 				utils.DefaultLogger,
 			),
 			protocol.MaxByteCount,
 			protocol.MaxByteCount,
 			protocol.MaxByteCount,
-			&utils.RTTStats{},
+			utils.NewRTTStats(),
 			utils.DefaultLogger,
 		)
 	}
 
 	t.Run("duplicate final offset", func(t *testing.T) {
 		fc := newFC()
-		require.NoError(t, fc.UpdateHighestReceived(50, true, time.Now()))
+		require.NoError(t, fc.UpdateHighestReceived(50, true, monotime.Now()))
 		// it is valid to receive the same final offset multiple times
-		require.NoError(t, fc.UpdateHighestReceived(50, true, time.Now()))
+		require.NoError(t, fc.UpdateHighestReceived(50, true, monotime.Now()))
 	})
 
 	t.Run("inconsistent final offset", func(t *testing.T) {
 		fc := newFC()
-		require.NoError(t, fc.UpdateHighestReceived(50, true, time.Now()))
-		err := fc.UpdateHighestReceived(51, true, time.Now())
+		require.NoError(t, fc.UpdateHighestReceived(50, true, monotime.Now()))
+		err := fc.UpdateHighestReceived(51, true, monotime.Now())
 		require.Error(t, err)
 		var terr *qerr.TransportError
 		require.ErrorAs(t, err, &terr)
@@ -82,9 +83,9 @@ func TestStreamFlowControllerFinalOffset(t *testing.T) {
 
 	t.Run("non-final offset past final offset", func(t *testing.T) {
 		fc := newFC()
-		require.NoError(t, fc.UpdateHighestReceived(50, true, time.Now()))
+		require.NoError(t, fc.UpdateHighestReceived(50, true, monotime.Now()))
 		// No matter the ordering, it's never ok to receive an offset past the final offset.
-		err := fc.UpdateHighestReceived(60, false, time.Now())
+		err := fc.UpdateHighestReceived(60, false, monotime.Now())
 		var terr *qerr.TransportError
 		require.ErrorAs(t, err, &terr)
 		require.Equal(t, qerr.FinalSizeError, terr.ErrorCode)
@@ -93,9 +94,9 @@ func TestStreamFlowControllerFinalOffset(t *testing.T) {
 
 	t.Run("final offset smaller than previous offset", func(t *testing.T) {
 		fc := newFC()
-		require.NoError(t, fc.UpdateHighestReceived(50, false, time.Now()))
+		require.NoError(t, fc.UpdateHighestReceived(50, false, monotime.Now()))
 		// If we received offset already, it's invalid to receive a smaller final offset.
-		err := fc.UpdateHighestReceived(40, true, time.Now())
+		err := fc.UpdateHighestReceived(40, true, monotime.Now())
 		var terr *qerr.TransportError
 		require.ErrorAs(t, err, &terr)
 		require.Equal(t, qerr.FinalSizeError, terr.ErrorCode)
@@ -108,7 +109,7 @@ func TestStreamAbandoning(t *testing.T) {
 		100,
 		protocol.MaxByteCount,
 		nil,
-		&utils.RTTStats{},
+		utils.NewRTTStats(),
 		utils.DefaultLogger,
 	)
 	require.True(t, connFC.UpdateSendWindow(300))
@@ -118,18 +119,18 @@ func TestStreamAbandoning(t *testing.T) {
 		60,
 		protocol.MaxByteCount,
 		100,
-		&utils.RTTStats{},
+		utils.NewRTTStats(),
 		utils.DefaultLogger,
 	)
 
-	require.NoError(t, fc.UpdateHighestReceived(50, true, time.Now()))
-	require.Zero(t, fc.GetWindowUpdate(time.Now()))
-	require.Zero(t, connFC.GetWindowUpdate(time.Now()))
+	require.NoError(t, fc.UpdateHighestReceived(50, true, monotime.Now()))
+	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
+	require.Zero(t, connFC.GetWindowUpdate(monotime.Now()))
 
 	// Abandon the stream.
 	// This marks all bytes as having been consumed.
 	fc.Abandon()
-	require.Equal(t, protocol.ByteCount(150), connFC.GetWindowUpdate(time.Now()))
+	require.Equal(t, protocol.ByteCount(150), connFC.GetWindowUpdate(monotime.Now()))
 }
 
 func TestStreamSendWindow(t *testing.T) {
@@ -139,7 +140,7 @@ func TestStreamSendWindow(t *testing.T) {
 		protocol.MaxByteCount,
 		protocol.MaxByteCount,
 		nil,
-		&utils.RTTStats{},
+		utils.NewRTTStats(),
 		utils.DefaultLogger,
 	)
 	require.True(t, connFC.UpdateSendWindow(300))
@@ -149,7 +150,7 @@ func TestStreamSendWindow(t *testing.T) {
 		protocol.MaxByteCount,
 		protocol.MaxByteCount,
 		100,
-		&utils.RTTStats{},
+		utils.NewRTTStats(),
 		utils.DefaultLogger,
 	)
 	// first, we're limited by the stream flow controller
@@ -182,37 +183,37 @@ func TestStreamWindowUpdate(t *testing.T) {
 			protocol.MaxByteCount,
 			protocol.MaxByteCount,
 			nil,
-			&utils.RTTStats{},
+			utils.NewRTTStats(),
 			utils.DefaultLogger,
 		),
 		100,
 		100,
 		protocol.MaxByteCount,
-		&utils.RTTStats{},
+		utils.NewRTTStats(),
 		utils.DefaultLogger,
 	)
-	require.Zero(t, fc.GetWindowUpdate(time.Now()))
+	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
 	hasStreamWindowUpdate, _ := fc.AddBytesRead(24)
 	require.False(t, hasStreamWindowUpdate)
-	require.Zero(t, fc.GetWindowUpdate(time.Now()))
+	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
 	// the window is updated when it's 25% filled
 	hasStreamWindowUpdate, _ = fc.AddBytesRead(1)
 	require.True(t, hasStreamWindowUpdate)
-	require.Equal(t, protocol.ByteCount(125), fc.GetWindowUpdate(time.Now()))
+	require.Equal(t, protocol.ByteCount(125), fc.GetWindowUpdate(monotime.Now()))
 
 	hasStreamWindowUpdate, _ = fc.AddBytesRead(24)
 	require.False(t, hasStreamWindowUpdate)
-	require.Zero(t, fc.GetWindowUpdate(time.Now()))
+	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
 	// the window is updated when it's 25% filled
 	hasStreamWindowUpdate, _ = fc.AddBytesRead(1)
 	require.True(t, hasStreamWindowUpdate)
-	require.Equal(t, protocol.ByteCount(150), fc.GetWindowUpdate(time.Now()))
+	require.Equal(t, protocol.ByteCount(150), fc.GetWindowUpdate(monotime.Now()))
 
 	// Receive the final offset.
 	// We don't need to send any more flow control updates.
-	require.NoError(t, fc.UpdateHighestReceived(100, true, time.Now()))
+	require.NoError(t, fc.UpdateHighestReceived(100, true, monotime.Now()))
 	fc.AddBytesRead(50)
-	require.Zero(t, fc.GetWindowUpdate(time.Now()))
+	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
 }
 
 func TestStreamConnectionWindowUpdate(t *testing.T) {
@@ -220,7 +221,7 @@ func TestStreamConnectionWindowUpdate(t *testing.T) {
 		100,
 		protocol.MaxByteCount,
 		nil,
-		&utils.RTTStats{},
+		utils.NewRTTStats(),
 		utils.DefaultLogger,
 	)
 	fc := NewStreamFlowController(
@@ -229,20 +230,20 @@ func TestStreamConnectionWindowUpdate(t *testing.T) {
 		1000,
 		protocol.MaxByteCount,
 		protocol.MaxByteCount,
-		&utils.RTTStats{},
+		utils.NewRTTStats(),
 		utils.DefaultLogger,
 	)
 
 	hasStreamWindowUpdate, hasConnWindowUpdate := fc.AddBytesRead(50)
 	require.False(t, hasStreamWindowUpdate)
-	require.Zero(t, fc.GetWindowUpdate(time.Now()))
+	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
 	require.True(t, hasConnWindowUpdate)
-	require.NotZero(t, connFC.GetWindowUpdate(time.Now()))
+	require.NotZero(t, connFC.GetWindowUpdate(monotime.Now()))
 }
 
 func TestStreamWindowAutoTuning(t *testing.T) {
 	// the RTT is 1 second
-	rttStats := &utils.RTTStats{}
+	rttStats := utils.NewRTTStats()
 	rttStats.UpdateRTT(time.Second, 0)
 	require.Equal(t, time.Second, rttStats.SmoothedRTT())
 
@@ -263,7 +264,7 @@ func TestStreamWindowAutoTuning(t *testing.T) {
 		utils.DefaultLogger,
 	)
 
-	now := time.Now()
+	now := monotime.Now()
 	require.NoError(t, fc.UpdateHighestReceived(100, false, now))
 
 	// data consumption is too slow, window size is not increased

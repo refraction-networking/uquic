@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/refraction-networking/uquic/internal/mocks"
+	"github.com/refraction-networking/uquic/internal/monotime"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/wire"
 
@@ -20,7 +21,7 @@ func TestStreamDeadlines(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	mockSender := NewMockStreamSender(mockCtrl)
 	mockFC := mocks.NewMockStreamFlowController(mockCtrl)
-	str := newStream(context.Background(), streamID, mockSender, mockFC)
+	str := newStream(context.Background(), streamID, mockSender, mockFC, false)
 
 	// SetDeadline sets both read and write deadlines
 	str.SetDeadline(time.Now().Add(-time.Second))
@@ -29,7 +30,7 @@ func TestStreamDeadlines(t *testing.T) {
 	require.Zero(t, n)
 
 	mockFC.EXPECT().UpdateHighestReceived(protocol.ByteCount(6), false, gomock.Any()).AnyTimes()
-	require.NoError(t, str.handleStreamFrame(&wire.StreamFrame{Data: []byte("foobar")}, time.Now()))
+	require.NoError(t, str.handleStreamFrame(&wire.StreamFrame{Data: []byte("foobar")}, monotime.Now()))
 	n, err = (&readerWithTimeout{Reader: str, Timeout: time.Second}).Read(make([]byte, 6))
 	require.ErrorIs(t, err, os.ErrDeadlineExceeded)
 	require.Zero(t, n)
@@ -38,7 +39,7 @@ func TestStreamDeadlines(t *testing.T) {
 func TestStreamCompletion(t *testing.T) {
 	completeReadSide := func(
 		t *testing.T,
-		str *stream,
+		str *Stream,
 		mockCtrl *gomock.Controller,
 		mockFC *mocks.MockStreamFlowController,
 	) {
@@ -49,7 +50,7 @@ func TestStreamCompletion(t *testing.T) {
 			StreamID: str.StreamID(),
 			Data:     []byte("foobar"),
 			Fin:      true,
-		}, time.Now()))
+		}, monotime.Now()))
 		_, err := (&readerWithTimeout{Reader: str, Timeout: time.Second}).Read(make([]byte, 6))
 		require.ErrorIs(t, err, io.EOF)
 		require.True(t, mockCtrl.Satisfied())
@@ -57,7 +58,7 @@ func TestStreamCompletion(t *testing.T) {
 
 	completeWriteSide := func(
 		t *testing.T,
-		str *stream,
+		str *Stream,
 		mockCtrl *gomock.Controller,
 		mockFC *mocks.MockStreamFlowController,
 		mockSender *MockStreamSender,
@@ -82,7 +83,7 @@ func TestStreamCompletion(t *testing.T) {
 		mockCtrl := gomock.NewController(t)
 		mockSender := NewMockStreamSender(mockCtrl)
 		mockFC := mocks.NewMockStreamFlowController(mockCtrl)
-		str := newStream(context.Background(), streamID, mockSender, mockFC)
+		str := newStream(context.Background(), streamID, mockSender, mockFC, false)
 
 		completeReadSide(t, str, mockCtrl, mockFC)
 		mockSender.EXPECT().onStreamCompleted(streamID)
@@ -93,7 +94,7 @@ func TestStreamCompletion(t *testing.T) {
 		mockCtrl := gomock.NewController(t)
 		mockSender := NewMockStreamSender(mockCtrl)
 		mockFC := mocks.NewMockStreamFlowController(mockCtrl)
-		str := newStream(context.Background(), streamID, mockSender, mockFC)
+		str := newStream(context.Background(), streamID, mockSender, mockFC, false)
 
 		completeWriteSide(t, str, mockCtrl, mockFC, mockSender)
 		mockSender.EXPECT().onStreamCompleted(streamID)

@@ -4,1127 +4,874 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"errors"
 	"io"
+	mrand "math/rand/v2"
 	"net/http"
-	"net/http/httptrace"
-	"net/textproto"
-	"sync"
+	"net/http/httptest"
+	"testing"
 	"time"
 
-	quic "github.com/refraction-networking/uquic"
-	mockquic "github.com/refraction-networking/uquic/internal/mocks/quic"
-	"github.com/refraction-networking/uquic/quicvarint"
-
 	"github.com/quic-go/qpack"
+	"github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic/http3/qlog"
+	"github.com/refraction-networking/uquic/qlogwriter"
+	"github.com/refraction-networking/uquic/quicvarint"
+	"github.com/refraction-networking/uquic/testutils/events"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
 
-func encodeResponse(status int) []byte {
-	buf := &bytes.Buffer{}
-	rstr := mockquic.NewMockStream(mockCtrl)
-	rstr.EXPECT().Write(gomock.Any()).Do(buf.Write).AnyTimes()
-	rw := newResponseWriter(newStream(rstr, nil, nil, func(r io.Reader, u uint64) error { return nil }), nil, false, nil)
-	if status == http.StatusEarlyHints {
-		rw.header.Add("Link", "</style.css>; rel=preload; as=style")
-		rw.header.Add("Link", "</script.js>; rel=preload; as=script")
+func TestClientSettings(t *testing.T) {
+	t.Run("enable datagrams", func(t *testing.T) {
+		testClientSettings(t, true, nil)
+	})
+	t.Run("additional settings", func(t *testing.T) {
+		testClientSettings(t, false, map[uint64]uint64{13: 37})
+	})
+}
+
+func testClientSettings(t *testing.T, enableDatagrams bool, other map[uint64]uint64) {
+	tr := &Transport{
+		EnableDatagrams:    enableDatagrams,
+		AdditionalSettings: other,
 	}
+
+	var eventRecorder events.Recorder
+	clientConn, serverConn := newConnPair(t, withClientRecorder(&eventRecorder))
+	tr.NewClientConn(clientConn)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	str, err := serverConn.AcceptUniStream(ctx)
+	require.NoError(t, err)
+
+	str.SetReadDeadline(time.Now().Add(time.Second))
+	typ, err := quicvarint.Read(quicvarint.NewReader(str))
+	require.NoError(t, err)
+	require.EqualValues(t, streamTypeControlStream, typ)
+	fp := (&frameParser{r: str})
+	f, err := fp.ParseNext(nil)
+	require.NoError(t, err)
+	require.IsType(t, &settingsFrame{}, f)
+	settingsFrame := f.(*settingsFrame)
+	require.Equal(t, settingsFrame.Datagram, enableDatagrams)
+	require.Equal(t, settingsFrame.Other, other)
+
+	var datagramValue *bool
+	if enableDatagrams {
+		datagramValue = pointer(true)
+	}
+	require.Equal(t,
+		[]qlogwriter.Event{
+			qlog.FrameCreated{
+				StreamID: str.StreamID(),
+				Raw:      qlog.RawInfo{Length: 10},
+				Frame: qlog.Frame{
+					Frame: qlog.SettingsFrame{
+						MaxFieldSectionSize: defaultMaxResponseHeaderBytes,
+						Datagram:            datagramValue,
+						Other:               other,
+					},
+				},
+			},
+		},
+		filterQlogEventsForFrame(eventRecorder.Events(qlog.FrameCreated{}), qlog.SettingsFrame{}),
+	)
+}
+
+func encodeResponse(t *testing.T, status int) []byte {
+	t.Helper()
+
+	mockCtrl := gomock.NewController(t)
+	buf := &bytes.Buffer{}
+	rstr := NewMockDatagramStream(mockCtrl)
+	rstr.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
+	rstr.EXPECT().Write(gomock.Any()).Do(buf.Write).AnyTimes()
+	rw := newResponseWriter(newStream(rstr, nil, nil, func(io.Reader, *headersFrame) error { return nil }, nil), nil, false, nil)
 	rw.WriteHeader(status)
 	rw.Flush()
 	return buf.Bytes()
 }
 
-var _ = Describe("Client", func() {
-	var handshakeChan <-chan struct{} // a closed chan
-
-	BeforeEach(func() {
-		ch := make(chan struct{})
-		close(ch)
-		handshakeChan = ch
+func TestClientRequest(t *testing.T) {
+	t.Run("GET", func(t *testing.T) {
+		rsp := testClientRequest(t, false, http.MethodGet, encodeResponse(t, http.StatusTeapot))
+		require.Equal(t, http.StatusTeapot, rsp.StatusCode)
+		require.Equal(t, "HTTP/3.0", rsp.Proto)
+		require.Equal(t, 3, rsp.ProtoMajor)
+		require.NotNil(t, rsp.Request)
 	})
 
-	Context("hijacking bidirectional streams", func() {
-		var (
-			request              *http.Request
-			conn                 *mockquic.MockEarlyConnection
-			settingsFrameWritten chan struct{}
+	t.Run("GET 0-RTT", func(t *testing.T) {
+		rsp := testClientRequest(t, true, http.MethodGet, encodeResponse(t, http.StatusOK))
+		require.Equal(t, http.StatusOK, rsp.StatusCode)
+	})
+
+	t.Run("HEAD", func(t *testing.T) {
+		rsp := testClientRequest(t, false, http.MethodHead, encodeResponse(t, http.StatusTeapot))
+		require.Equal(t, http.StatusTeapot, rsp.StatusCode)
+	})
+
+	t.Run("HEAD 0-RTT", func(t *testing.T) {
+		rsp := testClientRequest(t, true, http.MethodHead, encodeResponse(t, http.StatusOK))
+		require.Equal(t, http.StatusOK, rsp.StatusCode)
+	})
+}
+
+func testClientRequest(t *testing.T, use0RTT bool, method string, rspBytes []byte) *http.Response {
+	clientConn, serverConn := newConnPair(t)
+
+	reqMethod := method
+	if use0RTT {
+		switch method {
+		case http.MethodGet:
+			reqMethod = MethodGet0RTT
+		case http.MethodHead:
+			reqMethod = MethodHead0RTT
+		}
+	}
+	req, err := http.NewRequest(reqMethod, "http://quic-go.net", nil)
+	require.NoError(t, err)
+
+	type result struct {
+		rsp *http.Response
+		err error
+	}
+	resultChan := make(chan result, 1)
+	go func() {
+		cc := (&Transport{}).NewClientConn(clientConn)
+		rsp, err := cc.RoundTrip(req)
+		resultChan <- result{rsp: rsp, err: err}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	str, err := serverConn.AcceptStream(ctx)
+	require.NoError(t, err)
+	str.SetReadDeadline(time.Now().Add(time.Second))
+
+	hfs := decodeHeader(t, str)
+	require.Equal(t, []string{method}, hfs[":method"])
+
+	_, err = str.Write(rspBytes)
+	require.NoError(t, err)
+
+	var res result
+	select {
+	case res = <-resultChan:
+		require.NoError(t, res.err)
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+
+	// make sure the http.Request.Method value was not modified
+	if use0RTT {
+		switch reqMethod {
+		case MethodGet0RTT:
+			require.Equal(t, req.Method, MethodGet0RTT)
+		case MethodHead0RTT:
+			require.Equal(t, req.Method, MethodHead0RTT)
+		}
+	}
+	return res.rsp
+}
+
+func randomString(length int) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, length)
+	for i := range b {
+		n := mrand.IntN(len(alphabet))
+		b[i] = alphabet[n]
+	}
+	return string(b)
+}
+
+func TestClientRequestError(t *testing.T) {
+	clientConn, serverConn := newConnPair(t)
+
+	req, err := http.NewRequest(http.MethodGet, "http://quic-go.net", nil)
+	require.NoError(t, err)
+	for range 1000 {
+		req.Header.Add(randomString(50), randomString(50))
+	}
+
+	type result struct {
+		rsp *http.Response
+		err error
+	}
+	resultChan := make(chan result, 1)
+	go func() {
+		cc := (&Transport{}).NewClientConn(clientConn)
+		rsp, err := cc.RoundTrip(req)
+		resultChan <- result{rsp: rsp, err: err}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	str, err := serverConn.AcceptStream(ctx)
+	require.NoError(t, err)
+	str.CancelRead(quic.StreamErrorCode(ErrCodeExcessiveLoad))
+
+	_, err = str.Write(encodeResponse(t, http.StatusTeapot))
+	require.NoError(t, err)
+
+	var res result
+	select {
+	case res = <-resultChan:
+		require.NoError(t, res.err)
+		require.Equal(t, http.StatusTeapot, res.rsp.StatusCode)
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+}
+
+func TestClientResponseValidation(t *testing.T) {
+	t.Run("HEADERS frame too large", func(t *testing.T) {
+		require.ErrorContains(t,
+			testClientResponseValidation(t,
+				&Transport{MaxResponseHeaderBytes: 1337},
+				(&headersFrame{Length: 1338}).Append(nil),
+				quic.StreamErrorCode(ErrCodeFrameError),
+			),
+			"http3: HEADERS frame too large",
 		)
-		testDone := make(chan struct{})
-
-		BeforeEach(func() {
-			testDone = make(chan struct{})
-			settingsFrameWritten = make(chan struct{})
-			controlStr := mockquic.NewMockStream(mockCtrl)
-			controlStr.EXPECT().Write(gomock.Any()).Do(func(b []byte) (int, error) {
-				defer GinkgoRecover()
-				close(settingsFrameWritten)
-				return len(b), nil
-			})
-			conn = mockquic.NewMockEarlyConnection(mockCtrl)
-			conn.EXPECT().OpenUniStream().Return(controlStr, nil)
-			conn.EXPECT().HandshakeComplete().Return(handshakeChan)
-			conn.EXPECT().OpenStreamSync(gomock.Any()).Return(nil, errors.New("done"))
-			conn.EXPECT().AcceptUniStream(gomock.Any()).Return(nil, errors.New("done")).AnyTimes()
-			var err error
-			request, err = http.NewRequest("GET", "https://quic.clemente.io:1337/file1.dat", nil)
-			Expect(err).ToNot(HaveOccurred())
-		})
-
-		AfterEach(func() {
-			testDone <- struct{}{}
-			Eventually(settingsFrameWritten).Should(BeClosed())
-		})
-
-		It("hijacks a bidirectional stream of unknown frame type", func() {
-			id := quic.ConnectionTracingID(1234)
-			frameTypeChan := make(chan FrameType, 1)
-			tr := &Transport{
-				StreamHijacker: func(ft FrameType, connTracingID quic.ConnectionTracingID, _ quic.Stream, e error) (hijacked bool, err error) {
-					Expect(e).ToNot(HaveOccurred())
-					Expect(connTracingID).To(Equal(id))
-					frameTypeChan <- ft
-					return true, nil
-				},
-			}
-
-			buf := bytes.NewBuffer(quicvarint.Append(nil, 0x41))
-			unknownStr := mockquic.NewMockStream(mockCtrl)
-			unknownStr.EXPECT().Read(gomock.Any()).DoAndReturn(buf.Read).AnyTimes()
-			conn.EXPECT().AcceptStream(gomock.Any()).Return(unknownStr, nil)
-			conn.EXPECT().AcceptStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.Stream, error) {
-				<-testDone
-				return nil, errors.New("test done")
-			})
-			ctx := context.WithValue(context.Background(), quic.ConnectionTracingKey, id)
-			conn.EXPECT().Context().Return(ctx).AnyTimes()
-			cc := tr.NewClientConn(conn)
-			_, err := cc.RoundTrip(request)
-			Expect(err).To(MatchError("done"))
-			Eventually(frameTypeChan).Should(Receive(BeEquivalentTo(0x41)))
-			time.Sleep(scaleDuration(20 * time.Millisecond)) // don't EXPECT any calls to conn.CloseWithError
-		})
-
-		It("closes the connection when hijacker didn't hijack a bidirectional stream", func() {
-			frameTypeChan := make(chan FrameType, 1)
-			tr := &Transport{
-				StreamHijacker: func(ft FrameType, _ quic.ConnectionTracingID, _ quic.Stream, e error) (hijacked bool, err error) {
-					Expect(e).ToNot(HaveOccurred())
-					frameTypeChan <- ft
-					return false, nil
-				},
-			}
-
-			buf := bytes.NewBuffer(quicvarint.Append(nil, 0x41))
-			unknownStr := mockquic.NewMockStream(mockCtrl)
-			unknownStr.EXPECT().Read(gomock.Any()).DoAndReturn(buf.Read).AnyTimes()
-			conn.EXPECT().AcceptStream(gomock.Any()).Return(unknownStr, nil)
-			conn.EXPECT().AcceptStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.Stream, error) {
-				<-testDone
-				return nil, errors.New("test done")
-			})
-			ctx := context.WithValue(context.Background(), quic.ConnectionTracingKey, quic.ConnectionTracingID(1234))
-			conn.EXPECT().Context().Return(ctx).AnyTimes()
-			conn.EXPECT().CloseWithError(quic.ApplicationErrorCode(ErrCodeFrameUnexpected), gomock.Any()).Return(nil).AnyTimes()
-			cc := tr.NewClientConn(conn)
-			_, err := cc.RoundTrip(request)
-			Expect(err).To(MatchError("done"))
-			Eventually(frameTypeChan).Should(Receive(BeEquivalentTo(0x41)))
-		})
-
-		It("closes the connection when hijacker returned error", func() {
-			frameTypeChan := make(chan FrameType, 1)
-			tr := &Transport{
-				StreamHijacker: func(ft FrameType, _ quic.ConnectionTracingID, _ quic.Stream, e error) (hijacked bool, err error) {
-					Expect(e).ToNot(HaveOccurred())
-					frameTypeChan <- ft
-					return false, errors.New("error in hijacker")
-				},
-			}
-
-			buf := bytes.NewBuffer(quicvarint.Append(nil, 0x41))
-			unknownStr := mockquic.NewMockStream(mockCtrl)
-			unknownStr.EXPECT().Read(gomock.Any()).DoAndReturn(buf.Read).AnyTimes()
-			conn.EXPECT().AcceptStream(gomock.Any()).Return(unknownStr, nil)
-			conn.EXPECT().AcceptStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.Stream, error) {
-				<-testDone
-				return nil, errors.New("test done")
-			})
-			ctx := context.WithValue(context.Background(), quic.ConnectionTracingKey, quic.ConnectionTracingID(1234))
-			conn.EXPECT().Context().Return(ctx).AnyTimes()
-			conn.EXPECT().CloseWithError(quic.ApplicationErrorCode(ErrCodeFrameUnexpected), gomock.Any()).Return(nil).AnyTimes()
-			cc := tr.NewClientConn(conn)
-			_, err := cc.RoundTrip(request)
-			Expect(err).To(MatchError("done"))
-			Eventually(frameTypeChan).Should(Receive(BeEquivalentTo(0x41)))
-		})
-
-		It("handles errors that occur when reading the frame type", func() {
-			testErr := errors.New("test error")
-			unknownStr := mockquic.NewMockStream(mockCtrl)
-			done := make(chan struct{})
-			tr := &Transport{
-				StreamHijacker: func(ft FrameType, _ quic.ConnectionTracingID, str quic.Stream, e error) (hijacked bool, err error) {
-					defer close(done)
-					Expect(e).To(MatchError(testErr))
-					Expect(ft).To(BeZero())
-					Expect(str).To(Equal(unknownStr))
-					return false, nil
-				},
-			}
-
-			unknownStr.EXPECT().Read(gomock.Any()).Return(0, testErr).AnyTimes()
-			conn.EXPECT().AcceptStream(gomock.Any()).Return(unknownStr, nil)
-			conn.EXPECT().AcceptStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.Stream, error) {
-				<-testDone
-				return nil, errors.New("test done")
-			})
-			ctx := context.WithValue(context.Background(), quic.ConnectionTracingKey, quic.ConnectionTracingID(1234))
-			conn.EXPECT().Context().Return(ctx).AnyTimes()
-			conn.EXPECT().CloseWithError(quic.ApplicationErrorCode(ErrCodeFrameUnexpected), gomock.Any()).Return(nil).AnyTimes()
-			cc := tr.NewClientConn(conn)
-			_, err := cc.RoundTrip(request)
-			Expect(err).To(MatchError("done"))
-			Eventually(done).Should(BeClosed())
-			time.Sleep(scaleDuration(20 * time.Millisecond)) // don't EXPECT any calls to conn.CloseWithError
-		})
 	})
 
-	Context("hijacking unidirectional streams", func() {
-		var (
-			req                  *http.Request
-			conn                 *mockquic.MockEarlyConnection
-			settingsFrameWritten chan struct{}
+	t.Run("invalid headers", func(t *testing.T) {
+		headerBuf := &bytes.Buffer{}
+		enc := qpack.NewEncoder(headerBuf)
+		// not a valid response pseudo header
+		require.NoError(t, enc.WriteField(qpack.HeaderField{Name: ":method", Value: "GET"}))
+		require.NoError(t, enc.Close())
+		b := (&headersFrame{Length: uint64(headerBuf.Len())}).Append(nil)
+		b = append(b, headerBuf.Bytes()...)
+
+		require.ErrorContains(t,
+			testClientResponseValidation(t, &Transport{}, b, quic.StreamErrorCode(ErrCodeMessageError)),
+			"invalid response pseudo header",
 		)
-		testDone := make(chan struct{})
+	})
+}
 
-		BeforeEach(func() {
-			testDone = make(chan struct{})
-			settingsFrameWritten = make(chan struct{})
-			controlStr := mockquic.NewMockStream(mockCtrl)
-			controlStr.EXPECT().Write(gomock.Any()).Do(func(b []byte) (int, error) {
-				defer GinkgoRecover()
-				close(settingsFrameWritten)
-				return len(b), nil
-			})
-			conn = mockquic.NewMockEarlyConnection(mockCtrl)
-			conn.EXPECT().OpenUniStream().Return(controlStr, nil)
-			conn.EXPECT().HandshakeComplete().Return(handshakeChan)
-			conn.EXPECT().OpenStreamSync(gomock.Any()).Return(nil, errors.New("done"))
-			var err error
-			req, err = http.NewRequest("GET", "https://quic.clemente.io:1337/file1.dat", nil)
-			Expect(err).ToNot(HaveOccurred())
-		})
+func testClientResponseValidation(t *testing.T, tr *Transport, rsp []byte, expectedReset quic.StreamErrorCode) error {
+	clientConn, serverConn := newConnPair(t)
 
-		AfterEach(func() {
-			testDone <- struct{}{}
-			Eventually(settingsFrameWritten).Should(BeClosed())
-		})
+	cc := tr.NewClientConn(clientConn)
+	errChan := make(chan error)
+	go func() {
+		_, err := cc.RoundTrip(httptest.NewRequest(http.MethodGet, "http://quic-go.net", nil))
+		errChan <- err
+	}()
 
-		It("hijacks an unidirectional stream of unknown stream type", func() {
-			id := quic.ConnectionTracingID(100)
-			streamTypeChan := make(chan StreamType, 1)
-			tr := &Transport{
-				UniStreamHijacker: func(st StreamType, connTracingID quic.ConnectionTracingID, _ quic.ReceiveStream, err error) bool {
-					Expect(connTracingID).To(Equal(id))
-					Expect(err).ToNot(HaveOccurred())
-					streamTypeChan <- st
-					return true
-				},
-			}
-			buf := bytes.NewBuffer(quicvarint.Append(nil, 0x54))
-			unknownStr := mockquic.NewMockStream(mockCtrl)
-			unknownStr.EXPECT().Read(gomock.Any()).DoAndReturn(buf.Read).AnyTimes()
-			conn.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
-				return unknownStr, nil
-			})
-			conn.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
-				<-testDone
-				return nil, errors.New("test done")
-			})
-			ctx := context.WithValue(context.Background(), quic.ConnectionTracingKey, id)
-			conn.EXPECT().Context().Return(ctx).AnyTimes()
-			cc := tr.NewClientConn(conn)
-			_, err := cc.RoundTrip(req)
-			Expect(err).To(MatchError("done"))
-			Eventually(streamTypeChan).Should(Receive(BeEquivalentTo(0x54)))
-			time.Sleep(scaleDuration(20 * time.Millisecond)) // don't EXPECT any calls to conn.CloseWithError
-		})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	str, err := serverConn.AcceptStream(ctx)
+	require.NoError(t, err)
+	_, err = str.Write(rsp)
+	require.NoError(t, err)
 
-		It("handles errors that occur when reading the stream type", func() {
-			testErr := errors.New("test error")
-			done := make(chan struct{})
-			unknownStr := mockquic.NewMockStream(mockCtrl)
-			tr := &Transport{
-				UniStreamHijacker: func(st StreamType, _ quic.ConnectionTracingID, str quic.ReceiveStream, err error) bool {
-					defer close(done)
-					Expect(st).To(BeZero())
-					Expect(str).To(Equal(unknownStr))
-					Expect(err).To(MatchError(testErr))
-					return true
-				},
-			}
-			unknownStr.EXPECT().Read(gomock.Any()).Return(0, testErr)
-			conn.EXPECT().AcceptUniStream(gomock.Any()).Return(unknownStr, nil)
-			conn.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
-				<-testDone
-				return nil, errors.New("test done")
-			})
-			ctx := context.WithValue(context.Background(), quic.ConnectionTracingKey, quic.ConnectionTracingID(1234))
-			conn.EXPECT().Context().Return(ctx).AnyTimes()
-			cc := tr.NewClientConn(conn)
-			_, err := cc.RoundTrip(req)
-			Expect(err).To(MatchError("done"))
-			Eventually(done).Should(BeClosed())
-			time.Sleep(scaleDuration(20 * time.Millisecond)) // don't EXPECT any calls to conn.CloseWithError
-		})
+	select {
+	case err := <-errChan:
+		expectStreamWriteReset(t, str, expectedReset)
+		// The client closes the stream after sending the request,
+		// so we need to wait for the RESET_STREAM frame to be received.
+		time.Sleep(scaleDuration(10 * time.Millisecond))
+		expectStreamReadReset(t, str, expectedReset)
+		return err
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+	panic("unreachable")
+}
 
-		It("cancels reading when hijacker didn't hijack an unidirectional stream", func() {
-			streamTypeChan := make(chan StreamType, 1)
-			tr := &Transport{
-				UniStreamHijacker: func(st StreamType, _ quic.ConnectionTracingID, _ quic.ReceiveStream, err error) bool {
-					Expect(err).ToNot(HaveOccurred())
-					streamTypeChan <- st
-					return false
-				},
-			}
-			buf := bytes.NewBuffer(quicvarint.Append(nil, 0x54))
-			unknownStr := mockquic.NewMockStream(mockCtrl)
-			unknownStr.EXPECT().Read(gomock.Any()).DoAndReturn(buf.Read).AnyTimes()
-			unknownStr.EXPECT().CancelRead(quic.StreamErrorCode(ErrCodeStreamCreationError))
-			conn.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
-				return unknownStr, nil
-			})
-			conn.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
-				<-testDone
-				return nil, errors.New("test done")
-			})
-			ctx := context.WithValue(context.Background(), quic.ConnectionTracingKey, quic.ConnectionTracingID(1234))
-			conn.EXPECT().Context().Return(ctx).AnyTimes()
-			cc := tr.NewClientConn(conn)
-			_, err := cc.RoundTrip(req)
-			Expect(err).To(MatchError("done"))
-			Eventually(streamTypeChan).Should(Receive(BeEquivalentTo(0x54)))
-			time.Sleep(scaleDuration(20 * time.Millisecond)) // don't EXPECT any calls to conn.CloseWithError
-		})
+func TestClientRequestLengthLimit(t *testing.T) {
+	clientConn, serverConn := newConnPair(t)
+
+	cc := (&Transport{}).NewClientConn(clientConn)
+	errChan := make(chan error)
+	body := bytes.NewBufferString("request body")
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "http://quic-go.net", body)
+		req.ContentLength = 8
+		_, err := cc.RoundTrip(req)
+		errChan <- err
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	str, err := serverConn.AcceptStream(ctx)
+	require.NoError(t, err)
+
+	_, err = io.ReadAll(str)
+	var strErr *quic.StreamError
+	require.ErrorAs(t, err, &strErr)
+	require.Equal(t, quic.StreamErrorCode(ErrCodeRequestCanceled), strErr.ErrorCode)
+
+	_, err = str.Write(encodeResponse(t, http.StatusTeapot))
+	require.NoError(t, err)
+
+	select {
+	case err := <-errChan:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+}
+
+func TestClientExtendedConnect(t *testing.T) {
+	t.Run("enabled", func(t *testing.T) {
+		testClientExtendedConnect(t, true)
 	})
 
-	Context("SETTINGS handling", func() {
-		sendSettings := func() {
-			settingsFrameWritten := make(chan struct{})
-			controlStr := mockquic.NewMockStream(mockCtrl)
-			var buf bytes.Buffer
-			controlStr.EXPECT().Write(gomock.Any()).Do(func(b []byte) (int, error) {
-				defer GinkgoRecover()
-				buf.Write(b)
-				close(settingsFrameWritten)
-				return len(b), nil
-			})
-			conn := mockquic.NewMockEarlyConnection(mockCtrl)
-			conn.EXPECT().Context().Return(context.Background())
-			conn.EXPECT().OpenUniStream().Return(controlStr, nil)
-			conn.EXPECT().OpenStreamSync(gomock.Any()).DoAndReturn(func(context.Context) (quic.Stream, error) {
-				<-settingsFrameWritten
-				return nil, errors.New("test done")
-			})
-			conn.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
-				<-settingsFrameWritten
-				return nil, errors.New("test done")
-			}).AnyTimes()
-			conn.EXPECT().HandshakeComplete().Return(handshakeChan)
-			tr := &Transport{
-				EnableDatagrams: true,
-			}
-			cc := tr.NewClientConn(conn)
-			req, err := http.NewRequest(http.MethodGet, "https://quic-go.net", nil)
-			Expect(err).ToNot(HaveOccurred())
-			_, err = cc.RoundTrip(req)
-			Expect(err).To(MatchError("test done"))
-			t, err := quicvarint.Read(&buf)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(t).To(BeEquivalentTo(streamTypeControlStream))
-			settings, err := parseSettingsFrame(&buf, uint64(buf.Len()))
-			Expect(err).ToNot(HaveOccurred())
-			Expect(settings.Datagram).To(BeTrue())
+	t.Run("disabled", func(t *testing.T) {
+		testClientExtendedConnect(t, false)
+	})
+}
+
+func testClientExtendedConnect(t *testing.T, enabled bool) {
+	clientConn, serverConn := newConnPair(t)
+
+	cc := (&Transport{}).NewClientConn(clientConn)
+	req, err := http.NewRequest(http.MethodConnect, "http://quic-go.net", nil)
+	require.NoError(t, err)
+	req.Proto = "connect"
+
+	errChan := make(chan error)
+	go func() {
+		_, err := cc.RoundTrip(req)
+		errChan <- err
+	}()
+
+	select {
+	case <-errChan:
+		t.Fatal("RoundTrip should have blocked until SETTINGS were received")
+	case <-time.After(scaleDuration(10 * time.Millisecond)):
+	}
+
+	// now send the SETTINGS
+	settingsStr, err := serverConn.OpenUniStream()
+	require.NoError(t, err)
+	settingsStr.SetWriteDeadline(time.Now().Add(time.Second))
+	settingsFrame := &settingsFrame{ExtendedConnect: enabled}
+	_, err = settingsStr.Write(settingsFrame.Append(quicvarint.Append(nil, streamTypeControlStream)))
+	require.NoError(t, err)
+
+	select {
+	case <-cc.ReceivedSettings():
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for settings")
+	}
+	settings := cc.Settings()
+	require.Equal(t, enabled, settings.EnableExtendedConnect)
+
+	if enabled {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		str, err := serverConn.AcceptStream(ctx)
+		require.NoError(t, err)
+		str.CancelRead(1337)
+		str.CancelWrite(1337)
+	}
+
+	select {
+	case err := <-errChan:
+		if enabled {
+			require.ErrorIs(t, err, &Error{Remote: true, ErrorCode: 1337})
+		} else {
+			require.EqualError(t, err, "http3: server didn't enable Extended CONNECT")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+}
+
+func TestClient1xxHandling(t *testing.T) {
+	t.Run("a few early hints", func(t *testing.T) {
+		testClient1xxHandling(t, max1xxResponses, http.StatusOK, false)
+	})
+	t.Run("too many early hints", func(t *testing.T) {
+		testClient1xxHandling(t, max1xxResponses+1, http.StatusOK, true)
+	})
+	t.Run("EarlyHints followed by StatusSwitchingProtocols", func(t *testing.T) {
+		testClient1xxHandling(t, 1, http.StatusSwitchingProtocols, false)
+	})
+}
+
+func testClient1xxHandling(t *testing.T, numEarlyHints int, terminalStatus int, tooMany bool) {
+	var rspBuf bytes.Buffer
+	rstr := NewMockDatagramStream(gomock.NewController(t))
+	rstr.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
+	rstr.EXPECT().Write(gomock.Any()).Do(rspBuf.Write).AnyTimes()
+	rw := newResponseWriter(newStream(rstr, nil, nil, func(io.Reader, *headersFrame) error { return nil }, nil), nil, false, nil)
+	rw.header.Add("Link", "foo")
+	rw.header.Add("Link", "bar")
+	for range numEarlyHints {
+		rw.WriteHeader(http.StatusEarlyHints)
+	}
+	rw.WriteHeader(terminalStatus)
+	rw.Flush()
+	rspBytes := rspBuf.Bytes()
+
+	clientConn, serverConn := newConnPair(t)
+
+	type result struct {
+		rsp *http.Response
+		err error
+	}
+	resultChan := make(chan result, 1)
+	go func() {
+		cc := (&Transport{}).NewClientConn(clientConn)
+		rsp, err := cc.RoundTrip(httptest.NewRequest(http.MethodGet, "http://quic-go.net", nil))
+		resultChan <- result{rsp: rsp, err: err}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	str, err := serverConn.AcceptStream(ctx)
+	require.NoError(t, err)
+
+	// request headers
+	hfs := decodeHeader(t, str)
+	require.Equal(t, hfs[":method"], []string{http.MethodGet})
+
+	_, err = str.Write(rspBytes)
+	require.NoError(t, err)
+
+	var rsp *http.Response
+	select {
+	case res := <-resultChan:
+		if tooMany {
+			require.EqualError(t, res.err, "http3: too many 1xx informational responses")
+			return
+		}
+		require.NoError(t, res.err)
+		rsp = res.rsp
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+
+	require.Equal(t, []string{"foo", "bar"}, rsp.Header["Link"])
+	require.Equal(t, terminalStatus, rsp.StatusCode)
+}
+
+func TestClientGzip(t *testing.T) {
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	w.Write([]byte("foobar"))
+	w.Close()
+	gzippedFoobar := buf.Bytes()
+
+	t.Run("gzipped", func(t *testing.T) {
+		testClientGzip(t, gzippedFoobar, []byte("foobar"), false, true)
+	})
+	t.Run("not gzipped", func(t *testing.T) {
+		testClientGzip(t, []byte("foobar"), []byte("foobar"), false, false)
+	})
+	t.Run("disable compression", func(t *testing.T) {
+		testClientGzip(t, gzippedFoobar, gzippedFoobar, true, true)
+	})
+}
+
+func testClientGzip(t *testing.T,
+	data []byte,
+	expectedRsp []byte,
+	transportDisableCompression bool,
+	responseAddContentEncoding bool,
+) {
+	var rspBuf bytes.Buffer
+	rstr := NewMockDatagramStream(gomock.NewController(t))
+	rstr.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
+	rstr.EXPECT().Write(gomock.Any()).Do(rspBuf.Write).AnyTimes()
+	rw := newResponseWriter(newStream(rstr, nil, nil, func(io.Reader, *headersFrame) error { return nil }, nil), nil, false, nil)
+	rw.WriteHeader(http.StatusOK)
+	if responseAddContentEncoding {
+		rw.header.Add("Content-Encoding", "gzip")
+	}
+	rw.Write(data)
+	rw.Flush()
+
+	clientConn, serverConn := newConnPair(t)
+
+	type result struct {
+		rsp *http.Response
+		err error
+	}
+	resultChan := make(chan result)
+	go func() {
+		cc := (&Transport{DisableCompression: transportDisableCompression}).NewClientConn(clientConn)
+		rsp, err := cc.RoundTrip(httptest.NewRequest(http.MethodGet, "http://quic-go.net", nil))
+		resultChan <- result{rsp: rsp, err: err}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	str, err := serverConn.AcceptStream(ctx)
+	require.NoError(t, err)
+
+	// request headers
+	str.SetReadDeadline(time.Now().Add(time.Second))
+	hfs := decodeHeader(t, str)
+	if transportDisableCompression {
+		require.NotContains(t, hfs, "accept-encoding")
+	} else {
+		require.Equal(t, hfs["accept-encoding"], []string{"gzip"})
+	}
+
+	_, err = str.Write(rspBuf.Bytes())
+	require.NoError(t, err)
+	require.NoError(t, str.Close())
+
+	var rsp *http.Response
+	select {
+	case res := <-resultChan:
+		require.NoError(t, res.err)
+		rsp = res.rsp
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+
+	require.Equal(t, http.StatusOK, rsp.StatusCode)
+	body, err := io.ReadAll(rsp.Body)
+	require.NoError(t, err)
+	require.Equal(t, expectedRsp, body)
+}
+
+func TestClientRequestCancellation(t *testing.T) {
+	clientConn, serverConn := newConnPair(t)
+
+	requestCtx, requestCancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, "http://quic-go.net", nil)
+	require.NoError(t, err)
+
+	type result struct {
+		rsp *http.Response
+		err error
+	}
+	resultChan := make(chan result)
+	go func() {
+		cc := (&Transport{}).NewClientConn(clientConn)
+		rsp, err := cc.RoundTrip(req)
+		resultChan <- result{rsp: rsp, err: err}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	str, err := serverConn.AcceptStream(ctx)
+	require.NoError(t, err)
+
+	_, err = str.Write(encodeResponse(t, http.StatusTeapot))
+	require.NoError(t, err)
+
+	select {
+	case res := <-resultChan:
+		require.NoError(t, res.err)
+		require.Equal(t, http.StatusTeapot, res.rsp.StatusCode)
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+	requestCancel()
+
+	expectStreamWriteReset(t, str, quic.StreamErrorCode(ErrCodeRequestCanceled))
+}
+
+func TestClientConnGoAway(t *testing.T) {
+	t.Run("no active streams", func(t *testing.T) {
+		testClientConnGoAway(t, false)
+	})
+
+	t.Run("active stream", func(t *testing.T) {
+		testClientConnGoAway(t, true)
+	})
+}
+
+func testClientConnGoAway(t *testing.T, withStream bool) {
+	var clientEventRecorder events.Recorder
+	clientConn, serverConn := newConnPair(t, withClientRecorder(&clientEventRecorder))
+
+	cc := (&Transport{}).NewClientConn(clientConn)
+
+	var str *RequestStream
+	if withStream {
+		s, err := cc.OpenRequestStream(context.Background())
+		require.NoError(t, err)
+		str = s
+	}
+
+	// server sends control stream with SETTINGS and GOAWAY
+	b := quicvarint.Append(nil, streamTypeControlStream)
+	b = (&settingsFrame{}).Append(b)
+	b = (&goAwayFrame{StreamID: 8}).Append(b)
+	controlStr, err := serverConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr.Write(b)
+	require.NoError(t, err)
+
+	// the connection should be closed after the stream is closed
+	if withStream {
+		select {
+		case <-serverConn.Context().Done():
+			t.Fatal("connection closed")
+		case <-time.After(scaleDuration(10 * time.Millisecond)):
 		}
 
-		It("receives SETTINGS", func() {
-			sendSettings()
-			done := make(chan struct{})
-			conn := mockquic.NewMockEarlyConnection(mockCtrl)
-			conn.EXPECT().OpenUniStream().DoAndReturn(func() (quic.SendStream, error) {
-				<-done
-				return nil, errors.New("test done")
-			}).MaxTimes(1)
-			conn.EXPECT().Context().Return(context.Background())
-			b := quicvarint.Append(nil, streamTypeControlStream)
-			b = (&settingsFrame{ExtendedConnect: true}).Append(b)
-			r := bytes.NewReader(b)
-			controlStr := mockquic.NewMockStream(mockCtrl)
-			controlStr.EXPECT().Read(gomock.Any()).DoAndReturn(r.Read).AnyTimes()
-			conn.EXPECT().AcceptUniStream(gomock.Any()).Return(controlStr, nil)
-			conn.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
-				<-done
-				return nil, errors.New("test done")
-			})
+		// the stream ID in the GOAWAY frame is 8, so it's possible to open stream 4
+		str2, err := cc.OpenRequestStream(context.Background())
+		require.NoError(t, err)
+		str2.Close()
+		str2.CancelRead(1337)
 
-			tr := &Transport{}
-			cc := tr.NewClientConn(conn)
-			Eventually(cc.ReceivedSettings()).Should(BeClosed())
-			settings := cc.Settings()
-			Expect(settings.EnableExtendedConnect).To(BeTrue())
-			// test shutdown
-			conn.EXPECT().CloseWithError(gomock.Any(), gomock.Any()).MaxTimes(1)
-			close(done)
-		})
+		// it's not possible to open stream 8
+		_, err = cc.OpenRequestStream(context.Background())
+		require.ErrorIs(t, err, errGoAway)
 
-		It("checks the server's SETTINGS before sending an Extended CONNECT request", func() {
-			sendSettings()
-			done := make(chan struct{})
-			var wg sync.WaitGroup
-			wg.Add(2)
-			conn := mockquic.NewMockEarlyConnection(mockCtrl)
-			conn.EXPECT().OpenUniStream().DoAndReturn(func() (quic.SendStream, error) {
-				<-done
-				wg.Done()
-				return nil, errors.New("test done")
-			}).MaxTimes(1)
-			conn.EXPECT().Context().Return(context.Background())
-			b := quicvarint.Append(nil, streamTypeControlStream)
-			b = (&settingsFrame{ExtendedConnect: true}).Append(b)
-			r := bytes.NewReader(b)
-			controlStr := mockquic.NewMockStream(mockCtrl)
-			controlStr.EXPECT().Read(gomock.Any()).DoAndReturn(r.Read).AnyTimes()
-			conn.EXPECT().AcceptUniStream(gomock.Any()).Return(controlStr, nil)
-			conn.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
-				<-done
-				wg.Done()
-				return nil, errors.New("test done")
-			})
-			conn.EXPECT().HandshakeComplete().Return(handshakeChan)
-			conn.EXPECT().Context().Return(context.Background())
-			conn.EXPECT().OpenStreamSync(gomock.Any()).Return(nil, errors.New("test error"))
+		str.Close()
+		str.CancelRead(1337)
+	}
 
-			tr := &Transport{}
-			cc := tr.NewClientConn(conn)
-			_, err := cc.RoundTrip(&http.Request{
-				Method: http.MethodConnect,
-				Proto:  "connect",
-				Host:   "localhost",
-			})
-			Expect(err).To(MatchError("test error"))
-
-			// test shutdown
-			conn.EXPECT().CloseWithError(gomock.Any(), gomock.Any()).MaxTimes(1)
-			close(done)
-			wg.Wait()
-		})
-
-		It("rejects Extended CONNECT requests if the server doesn't enable it", func() {
-			sendSettings()
-			done := make(chan struct{})
-			var wg sync.WaitGroup
-			wg.Add(2)
-			conn := mockquic.NewMockEarlyConnection(mockCtrl)
-			conn.EXPECT().Context().Return(context.Background())
-			conn.EXPECT().OpenUniStream().DoAndReturn(func() (quic.SendStream, error) {
-				<-done
-				wg.Done()
-				return nil, errors.New("test done")
-			}).MaxTimes(1)
-			b := quicvarint.Append(nil, streamTypeControlStream)
-			b = (&settingsFrame{}).Append(b)
-			r := bytes.NewReader(b)
-			controlStr := mockquic.NewMockStream(mockCtrl)
-			controlStr.EXPECT().Read(gomock.Any()).DoAndReturn(r.Read).AnyTimes()
-			conn.EXPECT().AcceptUniStream(gomock.Any()).Return(controlStr, nil)
-			conn.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
-				<-done
-				wg.Done()
-				return nil, errors.New("test done")
-			})
-			conn.EXPECT().HandshakeComplete().Return(handshakeChan)
-			conn.EXPECT().Context().Return(context.Background())
-
-			tr := &Transport{}
-			cc := tr.NewClientConn(conn)
-			_, err := cc.RoundTrip(&http.Request{
-				Method: http.MethodConnect,
-				Proto:  "connect",
-				Host:   "localhost",
-			})
-			Expect(err).To(MatchError("http3: server didn't enable Extended CONNECT"))
-
-			// test shutdown
-			conn.EXPECT().CloseWithError(gomock.Any(), gomock.Any()).MaxTimes(1)
-			close(done)
-			wg.Wait()
-		})
-	})
-
-	Context("Doing requests", func() {
-		var (
-			req                  *http.Request
-			str                  *mockquic.MockStream
-			conn                 *mockquic.MockEarlyConnection
-			settingsFrameWritten chan struct{}
+	select {
+	case <-serverConn.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(serverConn.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeNoError)},
 		)
-		testDone := make(chan struct{})
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for close")
+	}
 
-		decodeHeader := func(str io.Reader) map[string]string {
-			fields := make(map[string]string)
-			decoder := qpack.NewDecoder(nil)
-
-			fp := frameParser{r: str}
-			frame, err := fp.ParseNext()
-			ExpectWithOffset(1, err).ToNot(HaveOccurred())
-			ExpectWithOffset(1, frame).To(BeAssignableToTypeOf(&headersFrame{}))
-			headersFrame := frame.(*headersFrame)
-			data := make([]byte, headersFrame.Length)
-			_, err = io.ReadFull(str, data)
-			ExpectWithOffset(1, err).ToNot(HaveOccurred())
-			hfs, err := decoder.DecodeFull(data)
-			ExpectWithOffset(1, err).ToNot(HaveOccurred())
-			for _, p := range hfs {
-				fields[p.Name] = p.Value
-			}
-			return fields
-		}
-
-		BeforeEach(func() {
-			settingsFrameWritten = make(chan struct{})
-			controlStr := mockquic.NewMockStream(mockCtrl)
-			controlStr.EXPECT().Write(gomock.Any()).Do(func(b []byte) (int, error) {
-				defer GinkgoRecover()
-				r := bytes.NewReader(b)
-				streamType, err := quicvarint.Read(r)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(streamType).To(BeEquivalentTo(streamTypeControlStream))
-				close(settingsFrameWritten)
-				return len(b), nil
-			}) // SETTINGS frame
-			str = mockquic.NewMockStream(mockCtrl)
-			str.EXPECT().Context().Return(context.Background()).AnyTimes()
-			str.EXPECT().StreamID().AnyTimes()
-			conn = mockquic.NewMockEarlyConnection(mockCtrl)
-			conn.EXPECT().Context().Return(context.Background())
-			conn.EXPECT().OpenUniStream().Return(controlStr, nil)
-			conn.EXPECT().AcceptUniStream(gomock.Any()).DoAndReturn(func(context.Context) (quic.ReceiveStream, error) {
-				<-testDone
-				return nil, errors.New("test done")
-			})
-			var err error
-			req, err = http.NewRequest("GET", "https://quic.clemente.io:1337/file1.dat", nil)
-			Expect(err).ToNot(HaveOccurred())
-		})
-
-		AfterEach(func() {
-			testDone <- struct{}{}
-			Eventually(settingsFrameWritten).Should(BeClosed())
-		})
-
-		It("errors if it can't open a request stream", func() {
-			testErr := errors.New("stream open error")
-			conn.EXPECT().OpenStreamSync(context.Background()).Return(nil, testErr)
-			conn.EXPECT().CloseWithError(gomock.Any(), gomock.Any()).MaxTimes(1)
-			conn.EXPECT().HandshakeComplete().Return(handshakeChan)
-			tr := &Transport{}
-			cc := tr.NewClientConn(conn)
-			_, err := cc.RoundTrip(req)
-			Expect(err).To(MatchError(testErr))
-		})
-
-		DescribeTable(
-			"performs a 0-RTT request",
-			func(method, serialized string) {
-				testErr := errors.New("stream open error")
-				req.Method = method
-				// don't EXPECT any calls to HandshakeComplete()
-				conn.EXPECT().OpenStreamSync(context.Background()).Return(str, nil)
-				buf := &bytes.Buffer{}
-				str.EXPECT().Write(gomock.Any()).DoAndReturn(buf.Write).AnyTimes()
-				str.EXPECT().Close()
-				str.EXPECT().CancelWrite(gomock.Any())
-				str.EXPECT().CancelRead(gomock.Any())
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(func([]byte) (int, error) {
-					return 0, testErr
-				})
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				_, err := cc.RoundTrip(req)
-				Expect(err).To(MatchError(testErr))
-				Expect(decodeHeader(buf)).To(HaveKeyWithValue(":method", serialized))
-				// make sure the request wasn't modified
-				Expect(req.Method).To(Equal(method))
+	expectedLen, expectedPayloadLen := expectedFrameLength(t, &goAwayFrame{StreamID: 8})
+	require.Equal(t,
+		[]qlogwriter.Event{
+			qlog.FrameParsed{
+				StreamID: controlStr.StreamID(),
+				Raw:      qlog.RawInfo{PayloadLength: expectedPayloadLen, Length: expectedLen},
+				Frame:    qlog.Frame{Frame: qlog.GoAwayFrame{StreamID: 8}},
 			},
-			Entry("GET", MethodGet0RTT, http.MethodGet),
-			Entry("HEAD", MethodHead0RTT, http.MethodHead),
-		)
+		},
+		filterQlogEventsForFrame(clientEventRecorder.Events(qlog.FrameParsed{}), qlog.GoAwayFrame{StreamID: 8}),
+	)
+}
 
-		It("returns a response", func() {
-			rspBuf := bytes.NewBuffer(encodeResponse(418))
-			gomock.InOrder(
-				conn.EXPECT().HandshakeComplete().Return(handshakeChan),
-				conn.EXPECT().OpenStreamSync(context.Background()).Return(str, nil),
-				conn.EXPECT().ConnectionState().Return(quic.ConnectionState{}),
-			)
-			str.EXPECT().Write(gomock.Any()).AnyTimes().DoAndReturn(func(p []byte) (int, error) { return len(p), nil })
-			str.EXPECT().Close()
-			str.EXPECT().Read(gomock.Any()).DoAndReturn(rspBuf.Read).AnyTimes()
-			tr := &Transport{}
-			cc := tr.NewClientConn(conn)
-			rsp, err := cc.RoundTrip(req)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(rsp.Proto).To(Equal("HTTP/3.0"))
-			Expect(rsp.ProtoMajor).To(Equal(3))
-			Expect(rsp.StatusCode).To(Equal(418))
-			Expect(rsp.Request).ToNot(BeNil())
-		})
+func TestClientConnGoConcurrent(t *testing.T) {
+	clientConn, serverConn := newConnPair(t, withServerBidiStreamLimit(1)) // allows streams 0
 
-		It("returns a response with trailers", func() {
-			rspBuf := bytes.NewBuffer(encodeResponse(418))
+	cc := (&Transport{}).NewClientConn(clientConn)
 
-			trailerBuf := &bytes.Buffer{}
-			enc := qpack.NewEncoder(trailerBuf)
-			Expect(enc.WriteField(qpack.HeaderField{Name: "This-Is-A-Trailer", Value: "0"})).To(Succeed())
-			Expect(enc.Close()).To(Succeed())
-			b := (&headersFrame{Length: uint64(trailerBuf.Len())}).Append(nil)
-			b = append(b, trailerBuf.Bytes()...)
-			rspBuf.Write(b)
+	// peer sends control stream with SETTINGS, but not GOAWAY yet
+	b := quicvarint.Append(nil, streamTypeControlStream)
+	b = (&settingsFrame{}).Append(b)
+	controlStr, err := serverConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr.Write(b)
+	require.NoError(t, err)
 
-			gomock.InOrder(
-				conn.EXPECT().HandshakeComplete().Return(handshakeChan),
-				conn.EXPECT().OpenStreamSync(context.Background()).Return(str, nil),
-				conn.EXPECT().ConnectionState().Return(quic.ConnectionState{}),
-			)
-			str.EXPECT().Write(gomock.Any()).AnyTimes().DoAndReturn(func(p []byte) (int, error) { return len(p), nil })
-			str.EXPECT().Close()
-			str.EXPECT().Read(gomock.Any()).DoAndReturn(rspBuf.Read).AnyTimes()
-			tr := &Transport{}
-			cc := tr.NewClientConn(conn)
-			rsp, err := cc.RoundTrip(req)
-			Expect(err).ToNot(HaveOccurred())
-			_, err = io.ReadAll(rsp.Body)
-			Expect(err).ToNot(HaveOccurred())
-			Expect(rsp.Trailer).To(Equal(http.Header{"This-Is-A-Trailer": []string{"0"}}))
-			Expect(rsp.Proto).To(Equal("HTTP/3.0"))
-			Expect(rsp.ProtoMajor).To(Equal(3))
-			Expect(rsp.StatusCode).To(Equal(418))
-			Expect(rsp.Request).ToNot(BeNil())
-		})
+	select {
+	case <-serverConn.Context().Done():
+		t.Fatal("connection closed")
+	case <-time.After(scaleDuration(10 * time.Millisecond)):
+	}
 
-		It("errors on invalid HEADERS frames", func() {
-			rspBuf := bytes.NewBuffer(encodeResponse(418))
-
-			b := (&headersFrame{Length: 10}).Append(nil)
-			b = append(b, []byte("invalid headers frame")...)
-			rspBuf.Write(b)
-
-			gomock.InOrder(
-				conn.EXPECT().HandshakeComplete().Return(handshakeChan),
-				conn.EXPECT().OpenStreamSync(context.Background()).Return(str, nil),
-				conn.EXPECT().ConnectionState().Return(quic.ConnectionState{}),
-			)
-			str.EXPECT().Write(gomock.Any()).AnyTimes().DoAndReturn(func(p []byte) (int, error) { return len(p), nil })
-			str.EXPECT().Close()
-			str.EXPECT().Read(gomock.Any()).DoAndReturn(rspBuf.Read).AnyTimes()
-			tr := &Transport{}
-			cc := tr.NewClientConn(conn)
-			rsp, err := cc.RoundTrip(req)
-			Expect(err).ToNot(HaveOccurred())
-			_, err = io.ReadAll(rsp.Body)
-			Expect(err).To(HaveOccurred())
-		})
-
-		It("returns an error if trailers are sent twice", func() {
-			rspBuf := bytes.NewBuffer(encodeResponse(418))
-
-			{
-				trailerBuf := &bytes.Buffer{}
-				enc := qpack.NewEncoder(trailerBuf)
-				Expect(enc.WriteField(qpack.HeaderField{Name: "This-Is-A-Trailer", Value: "0"})).To(Succeed())
-				Expect(enc.Close()).To(Succeed())
-				b := (&headersFrame{Length: uint64(trailerBuf.Len())}).Append(nil)
-				b = append(b, trailerBuf.Bytes()...)
-				rspBuf.Write(b)
+	// of these 2 OpenStreamSync calls, one will succeed, the other one will block
+	errChan := make(chan error, 3)
+	for range 2 {
+		go func() {
+			str, err := cc.OpenRequestStream(context.Background())
+			if err == nil {
+				str.Close()
 			}
+			errChan <- err
+		}()
+	}
 
-			{
-				trailerBuf := &bytes.Buffer{}
-				enc := qpack.NewEncoder(trailerBuf)
-				Expect(enc.WriteField(qpack.HeaderField{Name: "This-Is-A-Trailer", Value: "1"})).To(Succeed())
-				Expect(enc.Close()).To(Succeed())
-				b := (&headersFrame{Length: uint64(trailerBuf.Len())}).Append(nil)
-				b = append(b, trailerBuf.Bytes()...)
-				rspBuf.Write(b)
-			}
+	// wait until all Goroutines have started
+	time.Sleep(scaleDuration(10 * time.Millisecond))
 
-			gomock.InOrder(
-				conn.EXPECT().HandshakeComplete().Return(handshakeChan),
-				conn.EXPECT().OpenStreamSync(context.Background()).Return(str, nil),
-				conn.EXPECT().ConnectionState().Return(quic.ConnectionState{}),
-			)
-			str.EXPECT().Write(gomock.Any()).AnyTimes().DoAndReturn(func(p []byte) (int, error) { return len(p), nil })
-			str.EXPECT().Close()
-			str.EXPECT().Read(gomock.Any()).DoAndReturn(rspBuf.Read).AnyTimes()
-			tr := &Transport{}
-			cc := tr.NewClientConn(conn)
-			rsp, err := cc.RoundTrip(req)
-			Expect(err).ToNot(HaveOccurred())
-			_, err = io.ReadAll(rsp.Body)
-			Expect(err).To(MatchError(errors.New("additional HEADERS frame received after trailers")))
-			Expect(rsp.Trailer).To(Equal(http.Header{"This-Is-A-Trailer": []string{"0"}}))
-			Expect(rsp.Proto).To(Equal("HTTP/3.0"))
-			Expect(rsp.ProtoMajor).To(Equal(3))
-			Expect(rsp.StatusCode).To(Equal(418))
-			Expect(rsp.Request).ToNot(BeNil())
-		})
+	select {
+	case err := <-errChan:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+	// the second stream is still blocked
+	select {
+	case <-errChan:
+		t.Fatal("second OpenStreamSync should have blocked")
+	case <-time.After(scaleDuration(10 * time.Millisecond)):
+	}
 
-		It("returns an error if body frame is received after trailers", func() {
-			rspBuf := bytes.NewBuffer(encodeResponse(418))
+	// send the GOAWAY frame
+	b = (&goAwayFrame{StreamID: 4}).Append(nil)
+	_, err = controlStr.Write(b)
+	require.NoError(t, err)
 
-			{
-				trailerBuf := &bytes.Buffer{}
-				enc := qpack.NewEncoder(trailerBuf)
-				Expect(enc.WriteField(qpack.HeaderField{Name: "This-Is-A-Trailer", Value: "0"})).To(Succeed())
-				Expect(enc.Close()).To(Succeed())
-				b := (&headersFrame{Length: uint64(trailerBuf.Len())}).Append(nil)
-				b = append(b, trailerBuf.Bytes()...)
-				rspBuf.Write(b)
-			}
+	// accepting and closing the stream allows the client to open another stream
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	sstr, err := serverConn.AcceptStream(ctx)
+	require.NoError(t, err)
+	sstr.Close()
+	sstr.CancelRead(1337)
 
-			{
-				dataBuf := &bytes.Buffer{}
-				dataBuf.Write([]byte("test body please ignore"))
-				b := (&dataFrame{Length: uint64(dataBuf.Len())}).Append(nil)
-				b = append(b, dataBuf.Bytes()...)
-				rspBuf.Write(b)
-			}
+	// The second stream is opened by the client,
+	// and immediately closed with a H3_REQUEST_CANCELED error.
+	select {
+	case err := <-errChan:
+		require.ErrorIs(t, err, errGoAway)
+	case <-time.After(scaleDuration(10 * time.Millisecond)):
+		t.Fatal("timeout")
+	}
 
-			gomock.InOrder(
-				conn.EXPECT().HandshakeComplete().Return(handshakeChan),
-				conn.EXPECT().OpenStreamSync(context.Background()).Return(str, nil),
-				conn.EXPECT().ConnectionState().Return(quic.ConnectionState{}),
-			)
-			str.EXPECT().Write(gomock.Any()).AnyTimes().DoAndReturn(func(p []byte) (int, error) { return len(p), nil })
-			str.EXPECT().Close()
-			str.EXPECT().Read(gomock.Any()).DoAndReturn(rspBuf.Read).AnyTimes()
-			tr := &Transport{}
-			cc := tr.NewClientConn(conn)
-			rsp, err := cc.RoundTrip(req)
-			Expect(err).ToNot(HaveOccurred())
-			_, err = io.ReadAll(rsp.Body)
-			Expect(err).To(MatchError(errors.New("DATA frame received after trailers")))
-			Expect(rsp.Trailer).To(Equal(http.Header{"This-Is-A-Trailer": []string{"0"}}))
-			Expect(rsp.Proto).To(Equal("HTTP/3.0"))
-			Expect(rsp.ProtoMajor).To(Equal(3))
-			Expect(rsp.StatusCode).To(Equal(418))
-			Expect(rsp.Request).ToNot(BeNil())
-		})
+	sstr, err = serverConn.AcceptStream(ctx)
+	require.NoError(t, err)
+	_, err = sstr.Read([]byte{0})
+	require.ErrorIs(t, err, &quic.StreamError{StreamID: 4, ErrorCode: quic.StreamErrorCode(ErrCodeRequestCanceled), Remote: true})
+}
 
-		Context("requests containing a Body", func() {
-			var strBuf *bytes.Buffer
-
-			BeforeEach(func() {
-				strBuf = &bytes.Buffer{}
-				gomock.InOrder(
-					conn.EXPECT().HandshakeComplete().Return(handshakeChan),
-					conn.EXPECT().OpenStreamSync(context.Background()).Return(str, nil),
-				)
-				body := &mockBody{}
-				body.SetData([]byte("request body"))
-				var err error
-				req, err = http.NewRequest("POST", "https://quic.clemente.io:1337/upload", body)
-				Expect(err).ToNot(HaveOccurred())
-				str.EXPECT().Write(gomock.Any()).DoAndReturn(strBuf.Write).AnyTimes()
-			})
-
-			It("sends a request", func() {
-				done := make(chan struct{})
-				gomock.InOrder(
-					str.EXPECT().Close().Do(func() error { close(done); return nil }),
-					// when reading the response errors
-					str.EXPECT().CancelRead(gomock.Any()).MaxTimes(1),
-					str.EXPECT().CancelWrite(gomock.Any()).MaxTimes(1),
-				)
-				// the response body is sent asynchronously, while already reading the response
-				testErr := errors.New("test done")
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(func([]byte) (int, error) {
-					<-done
-					return 0, testErr
-				})
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				_, err := cc.RoundTrip(req)
-				Expect(err).To(MatchError(testErr))
-				hfs := decodeHeader(strBuf)
-				Expect(hfs).To(HaveKeyWithValue(":method", "POST"))
-				Expect(hfs).To(HaveKeyWithValue(":path", "/upload"))
-			})
-
-			It("doesn't send more bytes than allowed by http.Request.ContentLength", func() {
-				req.ContentLength = 7
-				var once sync.Once
-				done := make(chan struct{})
-				str.EXPECT().CancelRead(gomock.Any())
-				gomock.InOrder(
-					str.EXPECT().CancelWrite(gomock.Any()).Do(func(c quic.StreamErrorCode) {
-						once.Do(func() {
-							Expect(c).To(Equal(quic.StreamErrorCode(ErrCodeRequestCanceled)))
-							close(done)
-						})
-					}).AnyTimes(),
-					str.EXPECT().Close().MaxTimes(1),
-					str.EXPECT().CancelWrite(gomock.Any()).AnyTimes(),
-				)
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(func([]byte) (int, error) {
-					<-done
-					return 0, errors.New("done")
-				})
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				_, err := cc.RoundTrip(req)
-				Expect(err).To(HaveOccurred())
-				Expect(strBuf.String()).To(ContainSubstring("request"))
-				Expect(strBuf.String()).ToNot(ContainSubstring("request body"))
-			})
-
-			It("returns the error that occurred when reading the body", func() {
-				req.Body.(*mockBody).readErr = errors.New("testErr")
-				done := make(chan struct{})
-				str.EXPECT().CancelRead(gomock.Any())
-				gomock.InOrder(
-					str.EXPECT().CancelWrite(quic.StreamErrorCode(ErrCodeRequestCanceled)).Do(func(quic.StreamErrorCode) {
-						close(done)
-					}),
-					str.EXPECT().CancelWrite(gomock.Any()),
-				)
-
-				// the response body is sent asynchronously, while already reading the response
-				testErr := errors.New("test done")
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(func([]byte) (int, error) {
-					<-done
-					return 0, testErr
-				})
-				closed := make(chan struct{})
-				str.EXPECT().Close().Do(func() error { close(closed); return nil })
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				_, err := cc.RoundTrip(req)
-				Expect(err).To(MatchError(testErr))
-				Eventually(closed).Should(BeClosed())
-			})
-
-			It("closes the connection when the first frame is not a HEADERS frame", func() {
-				b := (&dataFrame{Length: 0x42}).Append(nil)
-				conn.EXPECT().CloseWithError(quic.ApplicationErrorCode(ErrCodeFrameUnexpected), gomock.Any())
-				closed := make(chan struct{})
-				r := bytes.NewReader(b)
-				str.EXPECT().Close().Do(func() error { close(closed); return nil })
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(r.Read).AnyTimes()
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				_, err := cc.RoundTrip(req)
-				Expect(err).To(MatchError("http3: expected first frame to be a HEADERS frame"))
-				Eventually(closed).Should(BeClosed())
-			})
-
-			It("cancels the stream when parsing the headers fails", func() {
-				headerBuf := &bytes.Buffer{}
-				enc := qpack.NewEncoder(headerBuf)
-				Expect(enc.WriteField(qpack.HeaderField{Name: ":method", Value: "GET"})).To(Succeed()) // not a valid response pseudo header
-				Expect(enc.Close()).To(Succeed())
-				b := (&headersFrame{Length: uint64(headerBuf.Len())}).Append(nil)
-				b = append(b, headerBuf.Bytes()...)
-
-				r := bytes.NewReader(b)
-				str.EXPECT().CancelRead(quic.StreamErrorCode(ErrCodeMessageError))
-				str.EXPECT().CancelWrite(quic.StreamErrorCode(ErrCodeMessageError))
-				closed := make(chan struct{})
-				str.EXPECT().Close().Do(func() error { close(closed); return nil })
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(r.Read).AnyTimes()
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				_, err := cc.RoundTrip(req)
-				Expect(err).To(HaveOccurred())
-				Eventually(closed).Should(BeClosed())
-			})
-
-			It("cancels the stream when the HEADERS frame is too large", func() {
-				tr := &Transport{MaxResponseHeaderBytes: 1337}
-				cc := tr.NewClientConn(conn)
-				b := (&headersFrame{Length: 1338}).Append(nil)
-				r := bytes.NewReader(b)
-				str.EXPECT().CancelRead(quic.StreamErrorCode(ErrCodeFrameError))
-				str.EXPECT().CancelWrite(quic.StreamErrorCode(ErrCodeFrameError))
-				closed := make(chan struct{})
-				str.EXPECT().Close().Do(func() error { close(closed); return nil })
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(r.Read).AnyTimes()
-				_, err := cc.RoundTrip(req)
-				Expect(err).To(MatchError("http3: HEADERS frame too large: 1338 bytes (max: 1337)"))
-				Eventually(closed).Should(BeClosed())
-			})
-
-			It("opens a request stream", func() {
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				conn.HandshakeComplete()
-				str, err := cc.OpenRequestStream(context.Background())
-				Expect(err).ToNot(HaveOccurred())
-				Expect(str.SendRequestHeader(req)).To(Succeed())
-				str.Write([]byte("foobar"))
-				d := dataFrame{Length: 6}
-				data := d.Append([]byte{})
-				data = append(data, []byte("foobar")...)
-				Expect(bytes.Contains(strBuf.Bytes(), data)).To(BeTrue())
-			})
-		})
-
-		Context("request cancellations", func() {
-			It("cancels a request while waiting for the handshake to complete", func() {
-				ctx, cancel := context.WithCancel(context.Background())
-				req := req.WithContext(ctx)
-				conn.EXPECT().HandshakeComplete().Return(make(chan struct{}))
-
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				errChan := make(chan error)
-				go func() {
-					_, err := cc.RoundTrip(req)
-					errChan <- err
-				}()
-				Consistently(errChan).ShouldNot(Receive())
-				cancel()
-				Eventually(errChan).Should(Receive(MatchError("context canceled")))
-			})
-
-			It("cancels a request while the request is still in flight", func() {
-				ctx, cancel := context.WithCancel(context.Background())
-				req := req.WithContext(ctx)
-				conn.EXPECT().HandshakeComplete().Return(handshakeChan)
-				conn.EXPECT().OpenStreamSync(ctx).Return(str, nil)
-				buf := &bytes.Buffer{}
-				str.EXPECT().Close().MaxTimes(1)
-				str.EXPECT().Write(gomock.Any()).DoAndReturn(buf.Write)
-
-				done := make(chan struct{})
-				canceled := make(chan struct{})
-				gomock.InOrder(
-					str.EXPECT().CancelWrite(quic.StreamErrorCode(ErrCodeRequestCanceled)).Do(func(quic.StreamErrorCode) { close(canceled) }),
-					str.EXPECT().CancelRead(quic.StreamErrorCode(ErrCodeRequestCanceled)).Do(func(quic.StreamErrorCode) { close(done) }),
-				)
-				str.EXPECT().CancelWrite(gomock.Any()).MaxTimes(1)
-				str.EXPECT().CancelRead(gomock.Any()).MaxTimes(1)
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(func([]byte) (int, error) {
-					cancel()
-					<-canceled
-					return 0, errors.New("test done")
-				})
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				_, err := cc.RoundTrip(req)
-				Expect(err).To(MatchError(context.Canceled))
-				Eventually(done).Should(BeClosed())
-			})
-
-			It("cancels a request after the response arrived", func() {
-				rspBuf := bytes.NewBuffer(encodeResponse(404))
-
-				ctx, cancel := context.WithCancel(context.Background())
-				req := req.WithContext(ctx)
-				conn.EXPECT().HandshakeComplete().Return(handshakeChan)
-				conn.EXPECT().OpenStreamSync(ctx).Return(str, nil)
-				conn.EXPECT().ConnectionState().Return(quic.ConnectionState{})
-				buf := &bytes.Buffer{}
-				str.EXPECT().Close().MaxTimes(1)
-
-				done := make(chan struct{})
-				str.EXPECT().Write(gomock.Any()).DoAndReturn(buf.Write)
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(rspBuf.Read).AnyTimes()
-				str.EXPECT().CancelWrite(quic.StreamErrorCode(ErrCodeRequestCanceled))
-				str.EXPECT().CancelRead(quic.StreamErrorCode(ErrCodeRequestCanceled)).Do(func(quic.StreamErrorCode) { close(done) })
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				_, err := cc.RoundTrip(req)
-				Expect(err).ToNot(HaveOccurred())
-				cancel()
-				Eventually(done).Should(BeClosed())
-			})
-		})
-
-		Context("gzip compression", func() {
-			BeforeEach(func() {
-				conn.EXPECT().HandshakeComplete().Return(handshakeChan)
-			})
-
-			It("adds the gzip header to requests", func() {
-				conn.EXPECT().OpenStreamSync(context.Background()).Return(str, nil)
-				buf := &bytes.Buffer{}
-				str.EXPECT().Write(gomock.Any()).DoAndReturn(buf.Write)
-				gomock.InOrder(
-					str.EXPECT().Close(),
-					// when the Read errors
-					str.EXPECT().CancelRead(gomock.Any()).MaxTimes(1),
-					str.EXPECT().CancelWrite(gomock.Any()).MaxTimes(1),
-				)
-				testErr := errors.New("test done")
-				str.EXPECT().Read(gomock.Any()).Return(0, testErr)
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				_, err := cc.RoundTrip(req)
-				Expect(err).To(MatchError(testErr))
-				hfs := decodeHeader(buf)
-				Expect(hfs).To(HaveKeyWithValue("accept-encoding", "gzip"))
-			})
-
-			It("doesn't add gzip if the header disable it", func() {
-				tr := &Transport{DisableCompression: true}
-				client := tr.NewClientConn(conn)
-				conn.EXPECT().OpenStreamSync(context.Background()).Return(str, nil)
-				buf := &bytes.Buffer{}
-				str.EXPECT().Write(gomock.Any()).DoAndReturn(buf.Write)
-				gomock.InOrder(
-					str.EXPECT().Close(),
-					// when the Read errors
-					str.EXPECT().CancelRead(gomock.Any()).MaxTimes(1),
-					str.EXPECT().CancelWrite(gomock.Any()).MaxTimes(1),
-				)
-				testErr := errors.New("test done")
-				str.EXPECT().Read(gomock.Any()).Return(0, testErr)
-				_, err := client.RoundTrip(req)
-				Expect(err).To(MatchError(testErr))
-				hfs := decodeHeader(buf)
-				Expect(hfs).ToNot(HaveKey("accept-encoding"))
-			})
-
-			It("decompresses the response", func() {
-				conn.EXPECT().OpenStreamSync(context.Background()).Return(str, nil)
-				conn.EXPECT().ConnectionState().Return(quic.ConnectionState{})
-				buf := &bytes.Buffer{}
-				rstr := mockquic.NewMockStream(mockCtrl)
-				rstr.EXPECT().StreamID().AnyTimes()
-				rstr.EXPECT().Write(gomock.Any()).Do(buf.Write).AnyTimes()
-				rw := newResponseWriter(newStream(rstr, nil, nil, func(r io.Reader, u uint64) error { return nil }), nil, false, nil)
-				rw.Header().Set("Content-Encoding", "gzip")
-				gz := gzip.NewWriter(rw)
-				gz.Write([]byte("gzipped response"))
-				gz.Close()
-				rw.Flush()
-				str.EXPECT().Write(gomock.Any()).AnyTimes().DoAndReturn(func(p []byte) (int, error) { return len(p), nil })
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(buf.Read).AnyTimes()
-				str.EXPECT().Close()
-
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				rsp, err := cc.RoundTrip(req)
-				Expect(err).ToNot(HaveOccurred())
-				data, err := io.ReadAll(rsp.Body)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(rsp.ContentLength).To(BeEquivalentTo(-1))
-				Expect(string(data)).To(Equal("gzipped response"))
-				Expect(rsp.Header.Get("Content-Encoding")).To(BeEmpty())
-				Expect(rsp.Uncompressed).To(BeTrue())
-			})
-
-			It("only decompresses the response if the response contains the right content-encoding header", func() {
-				conn.EXPECT().OpenStreamSync(context.Background()).Return(str, nil)
-				conn.EXPECT().ConnectionState().Return(quic.ConnectionState{})
-				buf := &bytes.Buffer{}
-				rstr := mockquic.NewMockStream(mockCtrl)
-				rstr.EXPECT().StreamID().AnyTimes()
-				rstr.EXPECT().Write(gomock.Any()).Do(buf.Write).AnyTimes()
-				rw := newResponseWriter(newStream(rstr, nil, nil, func(r io.Reader, u uint64) error { return nil }), nil, false, nil)
-				rw.Write([]byte("not gzipped"))
-				rw.Flush()
-				str.EXPECT().Write(gomock.Any()).AnyTimes().DoAndReturn(func(p []byte) (int, error) { return len(p), nil })
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(buf.Read).AnyTimes()
-				str.EXPECT().Close()
-
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				rsp, err := cc.RoundTrip(req)
-				Expect(err).ToNot(HaveOccurred())
-				data, err := io.ReadAll(rsp.Body)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(string(data)).To(Equal("not gzipped"))
-				Expect(rsp.Header.Get("Content-Encoding")).To(BeEmpty())
-			})
-		})
-
-		Context("1xx status code", func() {
-			It("continues to read next header if code is 103", func() {
-				var (
-					cnt    int
-					status int
-					hdr    textproto.MIMEHeader
-				)
-				header1 := "</style.css>; rel=preload; as=style"
-				header2 := "</script.js>; rel=preload; as=script"
-				ctx := httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
-					Got1xxResponse: func(code int, header textproto.MIMEHeader) error {
-						cnt++
-						status = code
-						hdr = header
-						return nil
-					},
-				})
-				req := req.WithContext(ctx)
-				rspBuf := bytes.NewBuffer(encodeResponse(103))
-				gomock.InOrder(
-					conn.EXPECT().HandshakeComplete().Return(handshakeChan),
-					conn.EXPECT().OpenStreamSync(ctx).Return(str, nil),
-					conn.EXPECT().ConnectionState().Return(quic.ConnectionState{}),
-				)
-				str.EXPECT().Write(gomock.Any()).AnyTimes().DoAndReturn(func(p []byte) (int, error) { return len(p), nil })
-				str.EXPECT().Close()
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(rspBuf.Read).AnyTimes()
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				rsp, err := cc.RoundTrip(req)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(rsp.Proto).To(Equal("HTTP/3.0"))
-				Expect(rsp.ProtoMajor).To(Equal(3))
-				Expect(rsp.StatusCode).To(Equal(200))
-				Expect(rsp.Header).To(HaveKeyWithValue("Link", []string{header1, header2}))
-				Expect(status).To(Equal(103))
-				Expect(cnt).To(Equal(1))
-				Expect(hdr).To(HaveKeyWithValue("Link", []string{header1, header2}))
-				Expect(rsp.Request).ToNot(BeNil())
-			})
-
-			It("doesn't continue to read next header if code is a terminal status", func() {
-				cnt := 0
-				status := 0
-				ctx := httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
-					Got1xxResponse: func(code int, header textproto.MIMEHeader) error {
-						cnt++
-						status = code
-						return nil
-					},
-				})
-				req := req.WithContext(ctx)
-				rspBuf := bytes.NewBuffer(encodeResponse(101))
-				gomock.InOrder(
-					conn.EXPECT().HandshakeComplete().Return(handshakeChan),
-					conn.EXPECT().OpenStreamSync(ctx).Return(str, nil),
-					conn.EXPECT().ConnectionState().Return(quic.ConnectionState{}),
-				)
-				str.EXPECT().Write(gomock.Any()).AnyTimes().DoAndReturn(func(p []byte) (int, error) { return len(p), nil })
-				str.EXPECT().Close()
-				str.EXPECT().Read(gomock.Any()).DoAndReturn(rspBuf.Read).AnyTimes()
-				tr := &Transport{}
-				cc := tr.NewClientConn(conn)
-				rsp, err := cc.RoundTrip(req)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(rsp.Proto).To(Equal("HTTP/3.0"))
-				Expect(rsp.ProtoMajor).To(Equal(3))
-				Expect(rsp.StatusCode).To(Equal(101))
-				Expect(status).To(Equal(0))
-				Expect(cnt).To(Equal(0))
-				Expect(rsp.Request).ToNot(BeNil())
-			})
-		})
+func TestClientConnGoAwayFailures(t *testing.T) {
+	t.Run("invalid frame", func(t *testing.T) {
+		b := (&settingsFrame{}).Append(nil)
+		// 1337 is invalid value for the Extended CONNECT setting
+		b = (&settingsFrame{Other: map[uint64]uint64{settingExtendedConnect: 1337}}).Append(b)
+		testClientConnGoAwayFailures(t, b, nil, ErrCodeFrameError)
 	})
-})
+
+	t.Run("not a GOAWAY", func(t *testing.T) {
+		b := (&settingsFrame{}).Append(nil)
+		// GOAWAY is the only allowed frame type after SETTINGS
+		b = (&headersFrame{}).Append(b)
+		testClientConnGoAwayFailures(t, b, nil, ErrCodeFrameUnexpected)
+	})
+
+	t.Run("stream closed before GOAWAY", func(t *testing.T) {
+		testClientConnGoAwayFailures(t, (&settingsFrame{}).Append(nil), io.EOF, ErrCodeClosedCriticalStream)
+	})
+
+	t.Run("stream reset before GOAWAY", func(t *testing.T) {
+		testClientConnGoAwayFailures(t,
+			(&settingsFrame{}).Append(nil),
+			&quic.StreamError{Remote: true, ErrorCode: 42},
+			ErrCodeClosedCriticalStream,
+		)
+	})
+
+	t.Run("invalid stream ID", func(t *testing.T) {
+		data := (&settingsFrame{}).Append(nil)
+		data = (&goAwayFrame{StreamID: 1}).Append(data)
+		testClientConnGoAwayFailures(t, data, nil, ErrCodeIDError)
+	})
+
+	t.Run("increased stream ID", func(t *testing.T) {
+		localConn, peerConn := newConnPair(t)
+
+		cc := (&Transport{}).NewClientConn(localConn)
+
+		// need an active stream so the connection doesn't close after the first GOAWAY
+		_, err := cc.OpenRequestStream(context.Background())
+		require.NoError(t, err)
+
+		controlStr, err := peerConn.OpenUniStream()
+		require.NoError(t, err)
+		b := quicvarint.Append(nil, streamTypeControlStream)
+		b = (&settingsFrame{}).Append(b)
+		b = (&goAwayFrame{StreamID: 4}).Append(b)
+		b = (&goAwayFrame{StreamID: 8}).Append(b)
+		_, err = controlStr.Write(b)
+		require.NoError(t, err)
+
+		select {
+		case <-peerConn.Context().Done():
+			require.ErrorIs(t,
+				context.Cause(peerConn.Context()),
+				&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeIDError)},
+			)
+		case <-time.After(time.Second):
+			t.Fatal("timeout waiting for close")
+		}
+	})
+}
+
+func testClientConnGoAwayFailures(t *testing.T, data []byte, readErr error, expectedErr ErrCode) {
+	localConn, peerConn := newConnPair(t)
+
+	(&Transport{}).NewClientConn(localConn)
+
+	controlStr, err := peerConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr.Write(quicvarint.Append(nil, streamTypeControlStream))
+	require.NoError(t, err)
+
+	switch readErr {
+	case nil:
+		_, err = controlStr.Write(data)
+		require.NoError(t, err)
+	case io.EOF:
+		_, err = controlStr.Write(data)
+		require.NoError(t, err)
+		require.NoError(t, controlStr.Close())
+	default:
+		// make sure the stream type is received
+		time.Sleep(scaleDuration(10 * time.Millisecond))
+		controlStr.CancelWrite(1337)
+	}
+
+	select {
+	case <-peerConn.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(peerConn.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(expectedErr)},
+		)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for close")
+	}
+}
+
+func TestClientConnHandleBidirectionalStream(t *testing.T) {
+	clientConn, serverConn := newConnPair(t)
+
+	cc := (&Transport{}).NewClientConn(clientConn)
+
+	str, err := clientConn.OpenStream()
+	require.NoError(t, err)
+	cc.HandleBidirectionalStream(str)
+
+	select {
+	case <-serverConn.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(serverConn.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeStreamCreationError)},
+		)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for connection close")
+	}
+}
+
+func TestRawClientConnHandleUnidirectionalStream(t *testing.T) {
+	clientConn, serverConn := newConnPair(t)
+
+	cc := (&Transport{}).NewRawClientConn(clientConn)
+
+	b := quicvarint.Append(nil, streamTypeControlStream)
+	b = (&settingsFrame{}).Append(b)
+	str, err := serverConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = str.Write(b)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	uniStr, err := clientConn.AcceptUniStream(ctx)
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cc.HandleUnidirectionalStream(uniStr)
+	}()
+
+	select {
+	case <-cc.ReceivedSettings():
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for settings")
+	}
+	require.NotNil(t, cc.Settings())
+}

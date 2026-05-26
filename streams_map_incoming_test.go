@@ -2,305 +2,363 @@ package quic
 
 import (
 	"context"
-	"errors"
+	"math/rand/v2"
+	"testing"
 	"time"
 
-	"golang.org/x/exp/rand"
-
 	"github.com/refraction-networking/uquic/internal/protocol"
+	"github.com/refraction-networking/uquic/internal/qerr"
+	"github.com/refraction-networking/uquic/internal/synctest"
 	"github.com/refraction-networking/uquic/internal/wire"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-type mockGenericStream struct {
-	num protocol.StreamNum
+type mockStream struct {
+	id protocol.StreamID
 
-	closed     bool
-	closeErr   error
-	sendWindow protocol.ByteCount
+	closed                bool
+	closeErr              error
+	sendWindow            protocol.ByteCount
+	supportsResetStreamAt bool
 }
 
-func (s *mockGenericStream) closeForShutdown(err error) {
+func (s *mockStream) closeForShutdown(err error) {
 	s.closed = true
 	s.closeErr = err
 }
 
-func (s *mockGenericStream) updateSendWindow(limit protocol.ByteCount) {
+func (s *mockStream) updateSendWindow(limit protocol.ByteCount) {
 	s.sendWindow = limit
 }
 
-var _ = Describe("Streams Map (incoming)", func() {
-	var (
-		m                   *incomingStreamsMap[*mockGenericStream]
-		newItemCounter      int
-		maxNumStreams       uint64
-		queuedControlFrames []wire.Frame
-	)
-	streamType := []protocol.StreamType{protocol.StreamTypeUni, protocol.StreamTypeUni}[rand.Intn(2)]
+func (s *mockStream) enableResetStreamAt() {
+	s.supportsResetStreamAt = true
+}
 
-	// check that the frame can be serialized and deserialized
-	checkFrameSerialization := func(f wire.Frame) {
-		b, err := f.Append(nil, protocol.Version1)
-		ExpectWithOffset(1, err).ToNot(HaveOccurred())
-		_, frame, err := wire.NewFrameParser(false).ParseNext(b, protocol.Encryption1RTT, protocol.Version1)
-		ExpectWithOffset(1, err).ToNot(HaveOccurred())
-		Expect(f).To(Equal(frame))
+func TestStreamsMapIncomingGettingStreams(t *testing.T) {
+	t.Run("client", func(t *testing.T) {
+		testStreamsMapIncomingGettingStreams(t, protocol.PerspectiveClient, protocol.FirstIncomingUniStreamClient)
+	})
+	t.Run("server", func(t *testing.T) {
+		testStreamsMapIncomingGettingStreams(t, protocol.PerspectiveServer, protocol.FirstIncomingUniStreamServer)
+	})
+}
+
+func testStreamsMapIncomingGettingStreams(t *testing.T, perspective protocol.Perspective, firstStream protocol.StreamID) {
+	var newStreamCounter int
+	const maxNumStreams = 10
+	m := newIncomingStreamsMap(
+		protocol.StreamTypeUni,
+		func(id protocol.StreamID) *mockStream {
+			newStreamCounter++
+			return &mockStream{id: id}
+		},
+		maxNumStreams,
+		func(f wire.Frame) {},
+		perspective,
+	)
+
+	// all streams up to the id on GetOrOpenStream are opened
+	str, err := m.GetOrOpenStream(firstStream + 4)
+	require.NoError(t, err)
+	require.NotNil(t, str)
+	require.Equal(t, 2, newStreamCounter)
+	require.Equal(t, firstStream+4, str.id)
+	// accept one of the streams
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	str, err = m.AcceptStream(ctx)
+	require.NoError(t, err)
+	require.Equal(t, firstStream, str.id)
+	// open some more streams
+	str, err = m.GetOrOpenStream(firstStream + 16)
+	require.NoError(t, err)
+	require.Equal(t, 5, newStreamCounter)
+	require.Equal(t, firstStream+16, str.id)
+	// and accept all of them
+	for i := 1; i < 5; i++ {
+		str, err := m.AcceptStream(ctx)
+		require.NoError(t, err)
+		require.Equal(t, firstStream+4*protocol.StreamID(i), str.id)
 	}
 
-	BeforeEach(func() { maxNumStreams = 5 })
+	_, err = m.GetOrOpenStream(firstStream + 4*maxNumStreams - 4)
+	require.NoError(t, err)
+	_, err = m.GetOrOpenStream(firstStream + 4*maxNumStreams)
+	require.ErrorIs(t, err, &qerr.TransportError{ErrorCode: qerr.StreamLimitError})
+	require.ErrorContains(t, err, "peer tried to open stream")
+	require.Equal(t, maxNumStreams, newStreamCounter)
+}
 
-	JustBeforeEach(func() {
-		queuedControlFrames = []wire.Frame{}
-		newItemCounter = 0
-		m = newIncomingStreamsMap(
-			streamType,
-			func(num protocol.StreamNum) *mockGenericStream {
-				newItemCounter++
-				return &mockGenericStream{num: num}
-			},
-			maxNumStreams,
-			func(f wire.Frame) { queuedControlFrames = append(queuedControlFrames, f) },
+func TestStreamsMapIncomingAcceptingStreams(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := newIncomingStreamsMap(
+			protocol.StreamTypeUni,
+			func(id protocol.StreamID) *mockStream { return &mockStream{id: id} },
+			5,
+			func(f wire.Frame) {},
+			protocol.PerspectiveClient,
 		)
-	})
 
-	It("opens all streams up to the id on GetOrOpenStream", func() {
-		_, err := m.GetOrOpenStream(4)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(newItemCounter).To(Equal(4))
-	})
-
-	It("starts opening streams at the right position", func() {
-		// like the test above, but with 2 calls to GetOrOpenStream
-		_, err := m.GetOrOpenStream(2)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(newItemCounter).To(Equal(2))
-		_, err = m.GetOrOpenStream(5)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(newItemCounter).To(Equal(5))
-	})
-
-	It("accepts streams in the right order", func() {
-		_, err := m.GetOrOpenStream(2) // open streams 1 and 2
-		Expect(err).ToNot(HaveOccurred())
-		str, err := m.AcceptStream(context.Background())
-		Expect(err).ToNot(HaveOccurred())
-		Expect(str.num).To(Equal(protocol.StreamNum(1)))
-		str, err = m.AcceptStream(context.Background())
-		Expect(err).ToNot(HaveOccurred())
-		Expect(str.num).To(Equal(protocol.StreamNum(2)))
-	})
-
-	It("allows opening the maximum stream ID", func() {
-		str, err := m.GetOrOpenStream(1)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(str.num).To(Equal(protocol.StreamNum(1)))
-	})
-
-	It("errors when trying to get a stream ID higher than the maximum", func() {
-		_, err := m.GetOrOpenStream(6)
-		Expect(err).To(HaveOccurred())
-		Expect(err.(streamError).TestError()).To(MatchError("peer tried to open stream 6 (current limit: 5)"))
-	})
-
-	It("blocks AcceptStream until a new stream is available", func() {
-		strChan := make(chan *mockGenericStream)
-		go func() {
-			defer GinkgoRecover()
-			str, err := m.AcceptStream(context.Background())
-			Expect(err).ToNot(HaveOccurred())
-			strChan <- str
-		}()
-		Consistently(strChan).ShouldNot(Receive())
-		str, err := m.GetOrOpenStream(1)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(str.num).To(Equal(protocol.StreamNum(1)))
-		var acceptedStr *mockGenericStream
-		Eventually(strChan).Should(Receive(&acceptedStr))
-		Expect(acceptedStr.num).To(Equal(protocol.StreamNum(1)))
-	})
-
-	It("unblocks AcceptStream when the context is canceled", func() {
+		// AcceptStream should respect the context
 		ctx, cancel := context.WithCancel(context.Background())
-		done := make(chan struct{})
+		defer cancel()
+		errChan := make(chan error, 1)
 		go func() {
-			defer GinkgoRecover()
 			_, err := m.AcceptStream(ctx)
-			Expect(err).To(MatchError("context canceled"))
-			close(done)
+			errChan <- err
 		}()
-		Consistently(done).ShouldNot(BeClosed())
-		cancel()
-		Eventually(done).Should(BeClosed())
-	})
 
-	It("unblocks AcceptStream when it is closed", func() {
-		testErr := errors.New("test error")
-		done := make(chan struct{})
-		go func() {
-			defer GinkgoRecover()
-			_, err := m.AcceptStream(context.Background())
-			Expect(err).To(MatchError(testErr))
-			close(done)
-		}()
-		Consistently(done).ShouldNot(BeClosed())
-		m.CloseWithError(testErr)
-		Eventually(done).Should(BeClosed())
-	})
+		synctest.Wait()
 
-	It("errors AcceptStream immediately if it is closed", func() {
-		testErr := errors.New("test error")
-		m.CloseWithError(testErr)
-		_, err := m.AcceptStream(context.Background())
-		Expect(err).To(MatchError(testErr))
-	})
-
-	It("closes all streams when CloseWithError is called", func() {
-		str1, err := m.GetOrOpenStream(1)
-		Expect(err).ToNot(HaveOccurred())
-		str2, err := m.GetOrOpenStream(3)
-		Expect(err).ToNot(HaveOccurred())
-		testErr := errors.New("test err")
-		m.CloseWithError(testErr)
-		Expect(str1.closed).To(BeTrue())
-		Expect(str1.closeErr).To(MatchError(testErr))
-		Expect(str2.closed).To(BeTrue())
-		Expect(str2.closeErr).To(MatchError(testErr))
-	})
-
-	It("deletes streams", func() {
-		_, err := m.GetOrOpenStream(1)
-		Expect(err).ToNot(HaveOccurred())
-		str, err := m.AcceptStream(context.Background())
-		Expect(err).ToNot(HaveOccurred())
-		Expect(str.num).To(Equal(protocol.StreamNum(1)))
-		Expect(m.DeleteStream(1)).To(Succeed())
-		str, err = m.GetOrOpenStream(1)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(str).To(BeNil())
-	})
-
-	It("waits until a stream is accepted before actually deleting it", func() {
-		_, err := m.GetOrOpenStream(2)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(m.DeleteStream(2)).To(Succeed())
-		str, err := m.AcceptStream(context.Background())
-		Expect(err).ToNot(HaveOccurred())
-		Expect(str.num).To(Equal(protocol.StreamNum(1)))
-		// when accepting this stream, it will get deleted, and a MAX_STREAMS frame is queued
-		str, err = m.AcceptStream(context.Background())
-		Expect(err).ToNot(HaveOccurred())
-		Expect(str.num).To(Equal(protocol.StreamNum(2)))
-	})
-
-	It("doesn't return a stream queued for deleting from GetOrOpenStream", func() {
-		str, err := m.GetOrOpenStream(1)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(str).ToNot(BeNil())
-		Expect(m.DeleteStream(1)).To(Succeed())
-		str, err = m.GetOrOpenStream(1)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(str).To(BeNil())
-		// when accepting this stream, it will get deleted, and a MAX_STREAMS frame is queued
-		str, err = m.AcceptStream(context.Background())
-		Expect(err).ToNot(HaveOccurred())
-		Expect(str).ToNot(BeNil())
-	})
-
-	It("errors when deleting a non-existing stream", func() {
-		err := m.DeleteStream(1337)
-		Expect(err).To(HaveOccurred())
-		Expect(err.(streamError).TestError()).To(MatchError("tried to delete unknown incoming stream 1337"))
-	})
-
-	It("sends MAX_STREAMS frames when streams are deleted", func() {
-		// open a bunch of streams
-		_, err := m.GetOrOpenStream(5)
-		Expect(err).ToNot(HaveOccurred())
-		// accept all streams
-		for i := 0; i < 5; i++ {
-			_, err := m.AcceptStream(context.Background())
-			Expect(err).ToNot(HaveOccurred())
+		select {
+		case <-errChan:
+			t.Fatal("AcceptStream should not return")
+		default:
 		}
-		Expect(queuedControlFrames).To(BeEmpty())
-		Expect(m.DeleteStream(3)).To(Succeed())
-		Expect(queuedControlFrames).To(HaveLen(1))
-		msf := queuedControlFrames[0].(*wire.MaxStreamsFrame)
-		Expect(msf.Type).To(BeEquivalentTo(streamType))
-		Expect(msf.MaxStreamNum).To(Equal(protocol.StreamNum(maxNumStreams + 1)))
-		checkFrameSerialization(msf)
-		Expect(m.DeleteStream(4)).To(Succeed())
-		Expect(queuedControlFrames).To(HaveLen(2))
-		Expect(queuedControlFrames[1].(*wire.MaxStreamsFrame).MaxStreamNum).To(Equal(protocol.StreamNum(maxNumStreams + 2)))
-		checkFrameSerialization(queuedControlFrames[1])
+
+		cancel()
+		synctest.Wait()
+		select {
+		case err := <-errChan:
+			require.Equal(t, context.Canceled, err)
+		default:
+			t.Fatal("timeout")
+		}
+
+		// AcceptStream should block if there are no streams available
+		go func() {
+			_, err := m.AcceptStream(context.Background())
+			errChan <- err
+		}()
+
+		synctest.Wait()
+
+		select {
+		case <-errChan:
+			t.Fatal("AcceptStream should block")
+		default:
+		}
+
+		_, err := m.GetOrOpenStream(protocol.FirstIncomingUniStreamClient)
+		require.NoError(t, err)
+
+		synctest.Wait()
+
+		select {
+		case err := <-errChan:
+			require.NoError(t, err)
+		default:
+			t.Fatal("timeout")
+		}
 	})
+}
 
-	Context("using high stream limits", func() {
-		BeforeEach(func() { maxNumStreams = uint64(protocol.MaxStreamCount) - 2 })
-
-		It("doesn't send MAX_STREAMS frames if they would overflow 2^60 (the maximum stream count)", func() {
-			// open a bunch of streams
-			_, err := m.GetOrOpenStream(5)
-			Expect(err).ToNot(HaveOccurred())
-			// accept all streams
-			for i := 0; i < 5; i++ {
-				_, err := m.AcceptStream(context.Background())
-				Expect(err).ToNot(HaveOccurred())
-			}
-			Expect(queuedControlFrames).To(BeEmpty())
-			Expect(m.DeleteStream(4)).To(Succeed())
-			Expect(queuedControlFrames).To(HaveLen(1))
-			Expect(queuedControlFrames[0].(*wire.MaxStreamsFrame).MaxStreamNum).To(Equal(protocol.MaxStreamCount - 1))
-			checkFrameSerialization(queuedControlFrames[0])
-			Expect(m.DeleteStream(3)).To(Succeed())
-			Expect(queuedControlFrames).To(HaveLen(2))
-			Expect(queuedControlFrames[1].(*wire.MaxStreamsFrame).MaxStreamNum).To(Equal(protocol.MaxStreamCount))
-			checkFrameSerialization(queuedControlFrames[1])
-			// at this point, we can't increase the stream limit any further, so no more MAX_STREAMS frames will be sent
-			Expect(m.DeleteStream(2)).To(Succeed())
-			Expect(m.DeleteStream(1)).To(Succeed())
-			Expect(queuedControlFrames).To(HaveLen(2))
-		})
+func TestStreamsMapIncomingDeletingStreams(t *testing.T) {
+	t.Run("client", func(t *testing.T) {
+		testStreamsMapIncomingDeletingStreams(t, protocol.PerspectiveClient, protocol.FirstIncomingUniStreamClient)
 	})
+	t.Run("server", func(t *testing.T) {
+		testStreamsMapIncomingDeletingStreams(t, protocol.PerspectiveServer, protocol.FirstIncomingUniStreamServer)
+	})
+}
 
-	Context("randomized tests", func() {
+func testStreamsMapIncomingDeletingStreams(t *testing.T, perspective protocol.Perspective, firstStream protocol.StreamID) {
+	var frameQueue []wire.Frame
+	m := newIncomingStreamsMap(
+		protocol.StreamTypeUni,
+		func(id protocol.StreamID) *mockStream { return &mockStream{id: id} },
+		5,
+		func(f wire.Frame) { frameQueue = append(frameQueue, f) },
+		perspective,
+	)
+	err := m.DeleteStream(firstStream + 1337*4)
+	require.ErrorIs(t, err, &qerr.TransportError{ErrorCode: qerr.StreamStateError})
+	require.ErrorContains(t, err, "tried to delete unknown incoming stream")
+
+	s, err := m.GetOrOpenStream(firstStream + 4)
+	require.NoError(t, err)
+	require.NotNil(t, s)
+	// delete the stream
+	require.NoError(t, m.DeleteStream(firstStream+4))
+	require.Empty(t, frameQueue)
+	// it's not returned by GetOrOpenStream anymore
+	s, err = m.GetOrOpenStream(firstStream + 4)
+	require.NoError(t, err)
+	require.Nil(t, s)
+
+	// AcceptStream still returns this stream
+	str, err := m.AcceptStream(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, firstStream, str.id)
+	require.Empty(t, frameQueue)
+
+	str, err = m.AcceptStream(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, firstStream+4, str.id)
+	// now the stream is deleted and new stream credit is issued
+	require.Len(t, frameQueue, 1)
+	require.Equal(t, &wire.MaxStreamsFrame{Type: protocol.StreamTypeUni, MaxStreamNum: 6}, frameQueue[0])
+	frameQueue = frameQueue[:0]
+
+	require.NoError(t, m.DeleteStream(firstStream))
+	require.Len(t, frameQueue, 1)
+	require.Equal(t, &wire.MaxStreamsFrame{Type: protocol.StreamTypeUni, MaxStreamNum: 7}, frameQueue[0])
+}
+
+// There's a maximum number that can be encoded in a MAX_STREAMS frame.
+// Since the stream limit is configurable by the user, we can't rely on this number
+// being high enough that it will never be reached in practice.
+func TestStreamsMapIncomingDeletingStreamsWithHighLimits(t *testing.T) {
+	t.Run("client", func(t *testing.T) {
+		testStreamsMapIncomingDeletingStreamsWithHighLimits(t, protocol.PerspectiveClient, protocol.FirstIncomingUniStreamClient)
+	})
+	t.Run("server", func(t *testing.T) {
+		testStreamsMapIncomingDeletingStreamsWithHighLimits(t, protocol.PerspectiveServer, protocol.FirstIncomingUniStreamServer)
+	})
+}
+
+func testStreamsMapIncomingDeletingStreamsWithHighLimits(t *testing.T, pers protocol.Perspective, firstStream protocol.StreamID) {
+	var frameQueue []wire.Frame
+	m := newIncomingStreamsMap(
+		protocol.StreamTypeUni,
+		func(id protocol.StreamID) *mockStream { return &mockStream{id: id} },
+		uint64(protocol.MaxStreamCount-2),
+		func(f wire.Frame) { frameQueue = append(frameQueue, f) },
+		pers,
+	)
+
+	// open a bunch of streams
+	_, err := m.GetOrOpenStream(firstStream + 16)
+	require.NoError(t, err)
+	// accept all streams
+	for range 5 {
+		_, err := m.AcceptStream(context.Background())
+		require.NoError(t, err)
+	}
+	require.Empty(t, frameQueue)
+	require.NoError(t, m.DeleteStream(firstStream+12))
+	require.Len(t, frameQueue, 1)
+	require.Equal(t,
+		&wire.MaxStreamsFrame{Type: protocol.StreamTypeUni, MaxStreamNum: protocol.MaxStreamCount - 1},
+		frameQueue[0],
+	)
+	require.NoError(t, m.DeleteStream(firstStream+8))
+	require.Len(t, frameQueue, 2)
+	require.Equal(t,
+		&wire.MaxStreamsFrame{Type: protocol.StreamTypeUni, MaxStreamNum: protocol.MaxStreamCount},
+		frameQueue[1],
+	)
+	// at this point, we can't increase the stream limit any further, so no more MAX_STREAMS frames will be sent
+	require.NoError(t, m.DeleteStream(firstStream+4))
+	require.NoError(t, m.DeleteStream(firstStream))
+	require.Len(t, frameQueue, 2)
+}
+
+func TestStreamsMapIncomingClosing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := newIncomingStreamsMap(
+			protocol.StreamTypeUni,
+			func(id protocol.StreamID) *mockStream { return &mockStream{id: id} },
+			5,
+			func(f wire.Frame) {},
+			protocol.PerspectiveServer,
+		)
+
+		var streams []*mockStream
+		_, err := m.GetOrOpenStream(protocol.FirstIncomingUniStreamServer + 8)
+		require.NoError(t, err)
+		for range 3 {
+			str, err := m.AcceptStream(context.Background())
+			require.NoError(t, err)
+			streams = append(streams, str)
+		}
+
+		errChan := make(chan error, 1)
+		go func() {
+			_, err := m.AcceptStream(context.Background())
+			errChan <- err
+		}()
+
+		m.CloseWithError(assert.AnError)
+		synctest.Wait()
+
+		// accepted streams should be closed
+		for _, str := range streams {
+			require.True(t, str.closed)
+			require.ErrorIs(t, str.closeErr, assert.AnError)
+		}
+		// AcceptStream should return the error
+		select {
+		case err := <-errChan:
+			require.ErrorIs(t, err, assert.AnError)
+		default:
+			t.Fatal("timeout")
+		}
+	})
+}
+
+func TestStreamsMapIncomingRandomized(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
 		const num = 1000
 
-		BeforeEach(func() { maxNumStreams = num })
+		streamType := []protocol.StreamType{protocol.StreamTypeUni, protocol.StreamTypeBidi}[rand.IntN(2)]
+		firstStream := protocol.FirstIncomingUniStreamServer
+		if streamType == protocol.StreamTypeBidi {
+			firstStream = protocol.FirstIncomingBidiStreamServer
+		}
 
-		It("opens and accepts streams", func() {
-			rand.Seed(uint64(GinkgoRandomSeed()))
-			ids := make([]protocol.StreamNum, num)
-			for i := 0; i < num; i++ {
-				ids[i] = protocol.StreamNum(i + 1)
+		m := newIncomingStreamsMap(
+			streamType,
+			func(id protocol.StreamID) *mockStream { return &mockStream{id: id} },
+			num,
+			func(f wire.Frame) {},
+			protocol.PerspectiveServer,
+		)
+
+		ids := make([]protocol.StreamID, num)
+		for i := range num {
+			ids[i] = firstStream + 4*protocol.StreamID(i)
+		}
+		rand.Shuffle(len(ids), func(i, j int) { ids[i], ids[j] = ids[j], ids[i] })
+
+		errChan1 := make(chan error, 1)
+		go func() {
+			for range num {
+				if _, err := m.AcceptStream(context.Background()); err != nil {
+					errChan1 <- err
+					return
+				}
 			}
-			rand.Shuffle(len(ids), func(i, j int) { ids[i], ids[j] = ids[j], ids[i] })
+			close(errChan1)
+		}()
 
-			const timeout = 5 * time.Second
-			done := make(chan struct{}, 2)
-			go func() {
-				defer GinkgoRecover()
-				ctx, cancel := context.WithTimeout(context.Background(), timeout)
-				defer cancel()
-				for i := 0; i < num; i++ {
-					_, err := m.AcceptStream(ctx)
-					Expect(err).ToNot(HaveOccurred())
+		errChan2 := make(chan error, 1)
+		go func() {
+			for i := range num {
+				if _, err := m.GetOrOpenStream(ids[i]); err != nil {
+					errChan2 <- err
+					return
 				}
-				done <- struct{}{}
-			}()
+			}
+			close(errChan2)
+		}()
 
-			go func() {
-				defer GinkgoRecover()
-				for i := 0; i < num; i++ {
-					_, err := m.GetOrOpenStream(ids[i])
-					Expect(err).ToNot(HaveOccurred())
-				}
-				done <- struct{}{}
-			}()
+		synctest.Wait()
 
-			Eventually(done, timeout*3/2).Should(Receive())
-			Eventually(done, timeout*3/2).Should(Receive())
-		})
+		select {
+		case err := <-errChan1:
+			require.NoError(t, err)
+		default:
+			t.Fatal("should have accepted all streams")
+		}
+		select {
+		case err := <-errChan2:
+			require.NoError(t, err)
+		default:
+			t.Fatal("should have opened all streams")
+		}
 	})
-})
+}

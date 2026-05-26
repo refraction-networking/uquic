@@ -2,14 +2,14 @@ package self_test
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"net"
 	"testing"
 	"time"
 
-	tls "github.com/refraction-networking/utls"
-
-	quic "github.com/refraction-networking/uquic"
-	"github.com/refraction-networking/uquic/logging"
+	"github.com/refraction-networking/uquic"
+	"github.com/refraction-networking/uquic/qlogwriter"
 
 	"github.com/stretchr/testify/require"
 )
@@ -18,11 +18,11 @@ func TestHandshakeContextTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), scaleDuration(20*time.Millisecond))
 	defer cancel()
 
-	conn := newUPDConnLocalhost(t)
+	conn := newUDPConnLocalhost(t)
 
 	errChan := make(chan error, 1)
 	go func() {
-		_, err := quic.Dial(ctx, newUPDConnLocalhost(t), conn.LocalAddr(), getTLSClientConfig(), getQuicConfig(nil))
+		_, err := quic.Dial(ctx, newUDPConnLocalhost(t), conn.LocalAddr(), getTLSClientConfig(), getQuicConfig(nil))
 		errChan <- err
 	}()
 
@@ -32,9 +32,9 @@ func TestHandshakeContextTimeout(t *testing.T) {
 func TestHandshakeCancellationError(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	errChan := make(chan error, 1)
-	conn := newUPDConnLocalhost(t)
+	conn := newUDPConnLocalhost(t)
 	go func() {
-		_, err := quic.Dial(ctx, newUPDConnLocalhost(t), conn.LocalAddr(), getTLSClientConfig(), getQuicConfig(nil))
+		_, err := quic.Dial(ctx, newUDPConnLocalhost(t), conn.LocalAddr(), getTLSClientConfig(), getQuicConfig(nil))
 		errChan <- err
 	}()
 
@@ -50,9 +50,9 @@ func TestConnContextOnServerSide(t *testing.T) {
 	streamContextChan := make(chan context.Context, 1)
 
 	tr := &quic.Transport{
-		Conn: newUPDConnLocalhost(t),
-		ConnContext: func(ctx context.Context) context.Context {
-			return context.WithValue(ctx, "foo", "bar") //nolint:staticcheck
+		Conn: newUDPConnLocalhost(t),
+		ConnContext: func(ctx context.Context, _ *quic.ClientInfo) (context.Context, error) {
+			return context.WithValue(ctx, "foo", "bar"), nil
 		},
 	}
 	defer tr.Close()
@@ -70,7 +70,7 @@ func TestConnContextOnServerSide(t *testing.T) {
 			},
 		},
 		getQuicConfig(&quic.Config{
-			Tracer: func(ctx context.Context, _ logging.Perspective, _ quic.ConnectionID) *logging.ConnectionTracer {
+			Tracer: func(ctx context.Context, _ bool, _ quic.ConnectionID) qlogwriter.Trace {
 				tracerContextChan <- ctx
 				return nil
 			},
@@ -81,7 +81,7 @@ func TestConnContextOnServerSide(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	c, err := quic.Dial(ctx, newUPDConnLocalhost(t), server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+	c, err := quic.Dial(ctx, newUDPConnLocalhost(t), server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 
 	serverConn, err := server.Accept(ctx)
@@ -133,11 +133,57 @@ func TestConnContextOnServerSide(t *testing.T) {
 	checkContext(tlsGetCertificateContextChan, false)
 }
 
+func TestConnContextRejection(t *testing.T) {
+	t.Run("rejecting", func(t *testing.T) {
+		testConnContextRejection(t, true)
+	})
+	t.Run("not rejecting", func(t *testing.T) {
+		testConnContextRejection(t, false)
+	})
+}
+
+func testConnContextRejection(t *testing.T, reject bool) {
+	tr := &quic.Transport{
+		Conn: newUDPConnLocalhost(t),
+		ConnContext: func(ctx context.Context, ci *quic.ClientInfo) (context.Context, error) {
+			if reject {
+				return nil, errors.New("rejecting connection")
+			}
+			return context.WithValue(ctx, "addr", ci.RemoteAddr), nil
+		},
+	}
+	defer tr.Close()
+
+	server, err := tr.Listen(
+		getTLSConfig(),
+		getQuicConfig(nil),
+	)
+	require.NoError(t, err)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	pc := newUDPConnLocalhost(t)
+	c, err := quic.Dial(ctx, pc, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+	if reject {
+		require.ErrorIs(t, err, &quic.TransportError{Remote: true, ErrorCode: quic.ConnectionRefused})
+		return
+	}
+	require.NoError(t, err)
+	defer c.CloseWithError(0, "")
+
+	conn, err := server.Accept(ctx)
+	require.NoError(t, err)
+	require.Equal(t, pc.LocalAddr().String(), conn.Context().Value("addr").(net.Addr).String())
+	conn.CloseWithError(0, "")
+}
+
 // Users are not supposed to return a fresh context from ConnContext, but we should handle it gracefully.
 func TestConnContextFreshContext(t *testing.T) {
 	tr := &quic.Transport{
-		Conn:        newUPDConnLocalhost(t),
-		ConnContext: func(ctx context.Context) context.Context { return context.Background() },
+		Conn: newUDPConnLocalhost(t),
+		ConnContext: func(ctx context.Context, _ *quic.ClientInfo) (context.Context, error) {
+			return context.Background(), nil
+		},
 	}
 	defer tr.Close()
 	server, err := tr.Listen(getTLSConfig(), getQuicConfig(nil))
@@ -156,7 +202,7 @@ func TestConnContextFreshContext(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	c, err := quic.Dial(ctx, newUPDConnLocalhost(t), server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+	c, err := quic.Dial(ctx, newUDPConnLocalhost(t), server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 
 	select {
@@ -171,7 +217,7 @@ func TestConnContextFreshContext(t *testing.T) {
 func TestContextOnClientSide(t *testing.T) {
 	tlsServerConf := getTLSConfig()
 	tlsServerConf.ClientAuth = tls.RequestClientCert
-	server, err := quic.Listen(newUPDConnLocalhost(t), tlsServerConf, getQuicConfig(nil))
+	server, err := quic.Listen(newUDPConnLocalhost(t), tlsServerConf, getQuicConfig(nil))
 	require.NoError(t, err)
 	defer server.Close()
 
@@ -183,14 +229,14 @@ func TestContextOnClientSide(t *testing.T) {
 		return &tlsServerConf.Certificates[0], nil
 	}
 
-	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), "foo", "bar")) //nolint:staticcheck
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), "foo", "bar"))
 	conn, err := quic.Dial(
 		ctx,
-		newUPDConnLocalhost(t),
+		newUDPConnLocalhost(t),
 		server.Addr(),
 		tlsConf,
 		getQuicConfig(&quic.Config{
-			Tracer: func(ctx context.Context, _ logging.Perspective, _ quic.ConnectionID) *logging.ConnectionTracer {
+			Tracer: func(ctx context.Context, _ bool, _ quic.ConnectionID) qlogwriter.Trace {
 				tracerContextChan <- ctx
 				return nil
 			},

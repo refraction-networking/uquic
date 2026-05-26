@@ -1,11 +1,11 @@
 package quic
 
 import (
+	rand "crypto/rand"
 	"fmt"
 	"math"
+	mrand "math/rand/v2"
 	"testing"
-
-	"golang.org/x/exp/rand"
 
 	"github.com/refraction-networking/uquic/internal/protocol"
 
@@ -90,9 +90,11 @@ func TestFrameSorterSimpleCases(t *testing.T) {
 // in particular when overlapping stream data is received.
 // This also includes returning buffers that are no longer needed.
 func TestFrameSorterGapHandling(t *testing.T) {
+	random := mrand.NewChaCha8([32]byte{'f', 'o', 'o', 'b', 'a', 'r'})
+
 	getData := func(l protocol.ByteCount) []byte {
 		b := make([]byte, l)
-		rand.Read(b)
+		random.Read(b)
 		return b
 	}
 
@@ -1404,7 +1406,10 @@ func testFrameSorterRandomized(t *testing.T, dataLen protocol.ByteCount, injectD
 	const num = 1000
 
 	data := make([]byte, num*int(dataLen))
-	rand.Read(data)
+	var seed [32]byte
+	rand.Read(seed[:])
+	random := mrand.NewChaCha8(seed)
+	random.Read(data)
 
 	frames := make([]frame, num)
 	for i := 0; i < num; i++ {
@@ -1416,7 +1421,7 @@ func testFrameSorterRandomized(t *testing.T, dataLen protocol.ByteCount, injectD
 			data:   b,
 		}
 	}
-	rand.Shuffle(len(frames), func(i, j int) { frames[i], frames[j] = frames[j], frames[i] })
+	mrand.Shuffle(len(frames), func(i, j int) { frames[i], frames[j] = frames[j], frames[i] })
 
 	s := newFrameSorter()
 
@@ -1429,7 +1434,7 @@ func testFrameSorterRandomized(t *testing.T, dataLen protocol.ByteCount, injectD
 	if injectDuplicates {
 		for i := 0; i < num/10; i++ {
 			cb, tr := getFrameSorterTestCallback(t)
-			df := frames[rand.Intn(len(frames))]
+			df := frames[mrand.IntN(len(frames))]
 			require.NoError(t, s.Push(df.data, df.offset, cb))
 			callbacks = append(callbacks, tr)
 		}
@@ -1438,8 +1443,8 @@ func testFrameSorterRandomized(t *testing.T, dataLen protocol.ByteCount, injectD
 		finalOffset := num * dataLen
 		for i := 0; i < num/3; i++ {
 			cb, tr := getFrameSorterTestCallback(t)
-			startOffset := protocol.ByteCount(rand.Intn(int(finalOffset)))
-			endOffset := startOffset + protocol.ByteCount(rand.Intn(int(finalOffset-startOffset)))
+			startOffset := protocol.ByteCount(mrand.IntN(int(finalOffset)))
+			endOffset := startOffset + protocol.ByteCount(mrand.IntN(int(finalOffset-startOffset)))
 			require.NoError(t, s.Push(data[startOffset:endOffset], startOffset, cb))
 			callbacks = append(callbacks, tr)
 		}
@@ -1466,4 +1471,42 @@ func testFrameSorterRandomized(t *testing.T, dataLen protocol.ByteCount, injectD
 	for _, cb := range callbacks {
 		require.True(t, cb.WasCalled())
 	}
+}
+
+func TestFrameSorterPeek(t *testing.T) {
+	s := newFrameSorter()
+	require.NoError(t, s.Peek(1337, []byte{})) // empty peek is a no-op
+	require.ErrorIs(t, s.Peek(0, []byte{0, 1, 2, 3, 4}), errTooLittleData)
+
+	require.NoError(t, s.Push([]byte("foobar"), 0, nil))
+
+	// peek partial frame
+	p := make([]byte, 3)
+	require.NoError(t, s.Peek(0, p))
+	require.Equal(t, []byte("foo"), p)
+	// peek entire frame
+	p = make([]byte, 6)
+	require.NoError(t, s.Peek(0, p))
+	require.Equal(t, []byte("foobar"), p)
+	// peek more than available
+	p = make([]byte, 10)
+	require.ErrorIs(t, s.Peek(0, p), errTooLittleData)
+	// peek at offset where no entry exists
+	p = make([]byte, 3)
+	require.ErrorIs(t, s.Peek(3, p), errTooLittleData)
+
+	// peek across multiple frames
+	s.Push([]byte("baz"), 6, nil)
+	p = make([]byte, 9)
+	require.NoError(t, s.Peek(0, p))
+	require.Equal(t, []byte("foobarbaz"), p)
+	// peek starting from second frame
+	p = make([]byte, 3)
+	require.NoError(t, s.Peek(6, p))
+	require.Equal(t, []byte("baz"), p)
+
+	// peeking across gaps doesn't work
+	s.Push([]byte("qux"), 10, nil)
+	p = make([]byte, 10)
+	require.ErrorIs(t, s.Peek(0, p), errTooLittleData)
 }
