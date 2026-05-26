@@ -3,7 +3,7 @@ package http3
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
+	tls "github.com/refraction-networking/utls" // [uQUIC]
 	"errors"
 	"fmt"
 	"io"

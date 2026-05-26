@@ -2,6 +2,7 @@ package http3
 
 import (
 	"context"
+	ctls "crypto/tls" // [uQUIC] needed for net/http.Request.TLS (*crypto/tls.ConnectionState)
 	"errors"
 	"io"
 	"log/slog"
@@ -165,7 +166,22 @@ func (c *RawServerConn) handleRequestStream(str *stateTrackingStream) {
 	}
 
 	connState := conn.ConnectionState().TLS
-	req.TLS = &connState
+	// [uQUIC] convert utls.ConnectionState → crypto/tls.ConnectionState for net/http.Request.TLS
+	req.TLS = &ctls.ConnectionState{
+		Version:                     connState.Version,
+		HandshakeComplete:           connState.HandshakeComplete,
+		DidResume:                   connState.DidResume,
+		CipherSuite:                 connState.CipherSuite,
+		NegotiatedProtocol:          connState.NegotiatedProtocol,
+		NegotiatedProtocolIsMutual:  connState.NegotiatedProtocolIsMutual,
+		ServerName:                  connState.ServerName,
+		PeerCertificates:            connState.PeerCertificates,
+		VerifiedChains:              connState.VerifiedChains,
+		SignedCertificateTimestamps: connState.SignedCertificateTimestamps,
+		OCSPResponse:                connState.OCSPResponse,
+		TLSUnique:                   connState.TLSUnique,
+	}
+	// [/uQUIC]
 	req.RemoteAddr = conn.RemoteAddr().String()
 
 	// Check that the client doesn't send more data in DATA frames than indicated by the Content-Length header (if set).

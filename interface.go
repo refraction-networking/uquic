@@ -2,7 +2,8 @@ package quic
 
 import (
 	"context"
-	"crypto/tls"
+	// [uQUIC] use utls instead of crypto/tls for ConnectionState compatibility
+	tls "github.com/refraction-networking/utls"
 	"errors"
 	"net"
 	"slices"

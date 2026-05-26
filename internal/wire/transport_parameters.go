@@ -90,6 +90,11 @@ type TransportParameters struct {
 	MaxDatagramFrameSize protocol.ByteCount // RFC 9221
 	EnableResetStreamAt  bool               // https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/06/
 	MinAckDelay          *time.Duration
+
+	// [uQUIC] ClientOverride is set when the user provides a QUICTransportParametersExtension
+	// via a ClientHelloSpec. When set, Marshal and MarshalForSessionTicket use these raw bytes
+	// instead of computing from the struct fields, preserving the user's fingerprint.
+	ClientOverride []byte
 }
 
 // Unmarshal the transport parameters
@@ -352,6 +357,12 @@ func (p *TransportParameters) readNumericTransportParameter(b []byte, paramID tr
 
 // Marshal the transport parameters
 func (p *TransportParameters) Marshal(pers protocol.Perspective) []byte {
+	// [uQUIC] If ClientOverride is set, use the user-provided raw transport parameters bytes.
+	if p.ClientOverride != nil {
+		return p.ClientOverride
+	}
+	// [/uQUIC]
+
 	// Typical Transport Parameters consume around 110 bytes, depending on the exact values,
 	// especially the lengths of the Connection IDs.
 	// Allocate 256 bytes, so we won't have to grow the slice in any case.
@@ -485,6 +496,12 @@ func (p *TransportParameters) marshalVarintParam(b []byte, id transportParameter
 // Since the session ticket is encrypted, the serialization format is defined by the server.
 // For convenience, we use the same format that we also use for sending the transport parameters.
 func (p *TransportParameters) MarshalForSessionTicket(b []byte) []byte {
+	// [uQUIC] If ClientOverride is set, use the user-provided raw bytes for the session ticket too.
+	if p.ClientOverride != nil {
+		return append(b, p.ClientOverride...)
+	}
+	// [/uQUIC]
+
 	b = quicvarint.Append(b, transportParameterMarshalingVersion)
 
 	// initial_max_stream_data_bidi_local

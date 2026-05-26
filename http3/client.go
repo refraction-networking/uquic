@@ -2,6 +2,7 @@ package http3
 
 import (
 	"context"
+	ctls "crypto/tls" // [uQUIC] needed for net/http.Response.TLS (*crypto/tls.ConnectionState)
 	"errors"
 	"fmt"
 	"io"
@@ -478,7 +479,22 @@ func (c *ClientConn) doRequest(req *http.Request, str *RequestStream) (*http.Res
 		break
 	}
 	connState := c.conn.ConnectionState().TLS
-	res.TLS = &connState
+	// [uQUIC] convert utls.ConnectionState → crypto/tls.ConnectionState for net/http.Response.TLS
+	res.TLS = &ctls.ConnectionState{
+		Version:                     connState.Version,
+		HandshakeComplete:           connState.HandshakeComplete,
+		DidResume:                   connState.DidResume,
+		CipherSuite:                 connState.CipherSuite,
+		NegotiatedProtocol:          connState.NegotiatedProtocol,
+		NegotiatedProtocolIsMutual:  connState.NegotiatedProtocolIsMutual,
+		ServerName:                  connState.ServerName,
+		PeerCertificates:            connState.PeerCertificates,
+		VerifiedChains:              connState.VerifiedChains,
+		SignedCertificateTimestamps: connState.SignedCertificateTimestamps,
+		OCSPResponse:                connState.OCSPResponse,
+		TLSUnique:                   connState.TLSUnique,
+	}
+	// [/uQUIC]
 	res.Request = req
 	return res, nil
 }

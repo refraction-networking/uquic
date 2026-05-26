@@ -2,7 +2,7 @@ package handshake
 
 import (
 	"crypto/rand"
-	"crypto/tls"
+	tls "github.com/refraction-networking/utls" // [uQUIC]
 	"fmt"
 	mrand "math/rand/v2"
 	"testing"

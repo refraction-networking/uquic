@@ -2,75 +2,38 @@ package handshake
 
 import (
 	"crypto"
-	"crypto/cipher"
+	_ "crypto/sha256"
+	_ "crypto/sha512"
 	"crypto/rand"
-	"crypto/tls"
+	tls "github.com/refraction-networking/utls" // [uQUIC]
 	"testing"
-	"unsafe"
-
-	"github.com/stretchr/testify/require"
 )
 
-var tls13CipherSuites = []uint16{tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384, tls.TLS_CHACHA20_POLY1305_SHA256}
+// [uQUIC] TestHKDF was removed because it used go:linkname to access crypto/tls internals
+// (crypto/tls.cipherSuitesTLS13 and crypto/tls.(*cipherSuiteTLS13).nextTrafficSecret).
+// uQUIC replaces crypto/tls with utls, so crypto/tls is not in the dependency graph and
+// the go:linkname approach fails at link time. See: 86fa4fd8 fix: remove tests that use go:linkname.
 
-type cipherSuiteTLS13 struct {
-	ID     uint16
-	KeyLen int
-	AEAD   func(key, fixedNonce []byte) cipher.AEAD
-	Hash   crypto.Hash
+// tls13SuiteHash maps TLS 1.3 cipher suite IDs to their associated hash function.
+var tls13SuiteHash = map[uint16]crypto.Hash{
+	tls.TLS_AES_128_GCM_SHA256:       crypto.SHA256,
+	tls.TLS_AES_256_GCM_SHA384:       crypto.SHA384,
+	tls.TLS_CHACHA20_POLY1305_SHA256: crypto.SHA256,
 }
 
-//go:linkname cipherSuitesTLS13 crypto/tls.cipherSuitesTLS13
-var cipherSuitesTLS13 []unsafe.Pointer
-
-func cipherSuiteTLS13ByID(id uint16) *cipherSuiteTLS13 {
-	for _, v := range cipherSuitesTLS13 {
-		cs := (*cipherSuiteTLS13)(v)
-		if cs.ID == id {
-			return cs
-		}
-	}
-	return nil
-}
-
-//go:linkname nextTrafficSecret crypto/tls.(*cipherSuiteTLS13).nextTrafficSecret
-func nextTrafficSecret(cs *cipherSuiteTLS13, trafficSecret []byte) []byte
-
-func TestHKDF(t *testing.T) {
-	for _, id := range tls13CipherSuites {
-		t.Run(tls.CipherSuiteName(id), func(t *testing.T) {
-			cs := cipherSuiteTLS13ByID(id)
-			expected := nextTrafficSecret(cs, []byte("foobar"))
-			expanded := hkdfExpandLabel(cs.Hash, []byte("foobar"), nil, "traffic upd", cs.Hash.Size())
-			require.Equal(t, expected, expanded)
-		})
-	}
-}
-
-// As of Go 1.24, the standard library and our implementation of hkdfExpandLabel should provide the same performance.
-func BenchmarkHKDFExpandLabelStandardLibrary(b *testing.B) {
-	for _, id := range tls13CipherSuites {
-		b.Run(tls.CipherSuiteName(id), func(b *testing.B) { benchmarkHKDFExpandLabel(b, id, true) })
-	}
-}
-
+// BenchmarkHKDFExpandLabelOurs benchmarks our hkdfExpandLabel implementation.
 func BenchmarkHKDFExpandLabelOurs(b *testing.B) {
-	for _, id := range tls13CipherSuites {
-		b.Run(tls.CipherSuiteName(id), func(b *testing.B) { benchmarkHKDFExpandLabel(b, id, false) })
+	for id, hash := range tls13SuiteHash {
+		b.Run(tls.CipherSuiteName(id), func(b *testing.B) { benchmarkHKDFExpandLabel(b, hash) })
 	}
 }
 
-func benchmarkHKDFExpandLabel(b *testing.B, cipherSuite uint16, useStdLib bool) {
+func benchmarkHKDFExpandLabel(b *testing.B, hash crypto.Hash) {
 	b.ReportAllocs()
-	cs := cipherSuiteTLS13ByID(cipherSuite)
 	secret := make([]byte, 32)
 	rand.Read(secret)
 
 	for b.Loop() {
-		if useStdLib {
-			nextTrafficSecret(cs, secret)
-		} else {
-			hkdfExpandLabel(cs.Hash, secret, nil, "traffic upd", cs.Hash.Size())
-		}
+		hkdfExpandLabel(hash, secret, nil, "traffic upd", hash.Size())
 	}
 }

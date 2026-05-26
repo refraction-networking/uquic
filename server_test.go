@@ -3,7 +3,7 @@ package quic
 import (
 	"context"
 	"crypto/rand"
-	"crypto/tls"
+	tls "github.com/refraction-networking/utls" // [uQUIC]
 	"errors"
 	"net"
 	"slices"

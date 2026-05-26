@@ -2,9 +2,11 @@ package handshake
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"io"
+
+	// [uQUIC] use utls for ConnectionState compatibility
+	tls "github.com/refraction-networking/utls"
 
 	"github.com/refraction-networking/uquic/internal/monotime"
 	"github.com/refraction-networking/uquic/internal/protocol"

@@ -2,7 +2,7 @@ package self_test
 
 import (
 	"context"
-	"crypto/tls"
+	tls "github.com/refraction-networking/utls" // [uQUIC]
 	"net"
 	"testing"
 	"time"

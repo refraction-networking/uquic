@@ -8,7 +8,7 @@ import (
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/utils"
 	"github.com/refraction-networking/uquic/internal/wire"
-	"github.com/refraction-networking/uquic/logging"
+	"github.com/refraction-networking/uquic/qlogwriter"
 	tls "github.com/refraction-networking/utls"
 )
 
@@ -26,12 +26,12 @@ var newUClientConnection = func(
 	initialPacketNumber protocol.PacketNumber,
 	enable0RTT bool,
 	hasNegotiatedVersion bool,
-	tracer *logging.ConnectionTracer,
+	qlogTrace qlogwriter.Trace,
 	logger utils.Logger,
 	v protocol.Version,
 	uSpec *QUICSpec, // [UQUIC]
-) quicConn {
-	s := &connection{
+) *wrappedConn {
+	s := &Conn{
 		conn:                conn,
 		config:              conf,
 		origDestConnID:      destConnID,
@@ -40,9 +40,12 @@ var newUClientConnection = func(
 		perspective:         protocol.PerspectiveClient,
 		logID:               destConnID.String(),
 		logger:              logger,
-		tracer:              tracer,
+		qlogTrace:           qlogTrace,
 		versionNegotiated:   hasNegotiatedVersion,
 		version:             v,
+	}
+	if qlogTrace != nil {
+		s.qlogger = qlogTrace.AddProducer()
 	}
 	s.connIDManager = newConnIDManager(
 		destConnID,
@@ -52,26 +55,30 @@ var newUClientConnection = func(
 	)
 
 	s.connIDGenerator = newConnIDGenerator(
+		runner,
 		srcConnID,
 		nil,
-		func(connID protocol.ConnectionID) { runner.Add(connID, s) },
 		statelessResetter,
-		runner.Remove,
-		runner.Retire,
-		runner.ReplaceWithClosed,
+		connRunnerCallbacks{
+			AddConnectionID:    func(connID protocol.ConnectionID) { runner.Add(connID, s) },
+			RemoveConnectionID: runner.Remove,
+			ReplaceWithClosed:  runner.ReplaceWithClosed,
+		},
 		s.queueControlFrame,
 		connIDGenerator,
 	)
 	s.ctx, s.ctxCancel = context.WithCancelCause(ctx)
 	s.preSetup()
-	s.sentPacketHandler, s.receivedPacketHandler = ackhandler.NewUAckHandler(
+	s.sentPacketHandler = ackhandler.NewUAckHandler(
 		initialPacketNumber,
 		protocol.ByteCount(s.config.InitialPacketSize),
 		s.rttStats,
+		&s.connStats,
 		false, // has no effect
 		s.conn.capabilities().ECN,
+		s.receivedPacketHandler.IgnorePacketsBelow,
 		s.perspective,
-		s.tracer,
+		s.qlogger,
 		s.logger,
 	)
 	s.currentMTUEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
@@ -133,8 +140,8 @@ var newUClientConnection = func(
 			params.MaxDatagramFrameSize = protocol.InvalidByteCount
 		}
 	}
-	if s.tracer != nil && s.tracer.SentTransportParameters != nil {
-		s.tracer.SentTransportParameters(params)
+	if s.qlogger != nil {
+		s.qlogTransportParameters(params, protocol.PerspectiveClient, false)
 	}
 	cs := handshake.NewUCryptoSetupClient(
 		destConnID,
@@ -142,7 +149,7 @@ var newUClientConnection = func(
 		tlsConf,
 		enable0RTT,
 		s.rttStats,
-		tracer,
+		s.qlogger,
 		logger,
 		s.version,
 		uSpec.ClientHelloSpec,
@@ -151,7 +158,7 @@ var newUClientConnection = func(
 	s.cryptoStreamManager = newCryptoStreamManager(s.initialStream, s.handshakeStream, oneRTTStream)
 	s.unpacker = newPacketUnpacker(cs, s.srcConnIDLen)
 	s.packer = newUPacketPacker(
-		newPacketPacker(srcConnID, s.connIDManager.Get, s.initialStream, s.handshakeStream, s.sentPacketHandler, s.retransmissionQueue, cs, s.framer, s.receivedPacketHandler, s.datagramQueue, s.perspective),
+		newPacketPacker(srcConnID, s.connIDManager.Get, s.initialStream, s.handshakeStream, s.sentPacketHandler, s.retransmissionQueue, cs, s.framer, &s.receivedPacketHandler, s.datagramQueue, s.perspective),
 		uSpec,
 	)
 	if len(tlsConf.ServerName) > 0 {
@@ -164,5 +171,5 @@ var newUClientConnection = func(
 			s.packer.SetToken(token.data)
 		}
 	}
-	return s
+	return &wrappedConn{Conn: s}
 }

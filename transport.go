@@ -3,7 +3,8 @@ package quic
 import (
 	"context"
 	"crypto/rand"
-	"crypto/tls"
+	// [uQUIC] use utls instead of crypto/tls for API compatibility
+	tls "github.com/refraction-networking/utls"
 	"errors"
 	"fmt"
 	"net"

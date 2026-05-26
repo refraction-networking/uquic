@@ -3,7 +3,7 @@ package self_test
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
+	tls "github.com/refraction-networking/utls" // [uQUIC]
 	"fmt"
 	"io"
 	mrand "math/rand/v2"

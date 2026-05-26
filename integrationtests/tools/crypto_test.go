@@ -1,7 +1,7 @@
 package tools
 
 import (
-	"crypto/tls"
+	tls "github.com/refraction-networking/utls" // [uQUIC]
 	"crypto/x509"
 	"io"
 	"net"

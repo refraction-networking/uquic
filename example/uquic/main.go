@@ -41,7 +41,7 @@ func main() {
 	transport := &http3.Transport{
 		TLSClientConfig: tlsConf,
 		QUICConfig:      quicConf,
-		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			udpConn, err := net.ListenUDP("udp", nil)
 			if err != nil {
 				return nil, err

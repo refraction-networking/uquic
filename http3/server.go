@@ -2,7 +2,8 @@ package http3
 
 import (
 	"context"
-	"crypto/tls"
+	// [uQUIC] use utls instead of crypto/tls for API compatibility
+	tls "github.com/refraction-networking/utls"
 	"errors"
 	"fmt"
 	"io"

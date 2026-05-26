@@ -3,10 +3,10 @@ package quic
 import (
 	"bytes"
 	"fmt"
-	"time"
 
 	"github.com/refraction-networking/clienthellod"
 	"github.com/refraction-networking/uquic/internal/handshake"
+	"github.com/refraction-networking/uquic/internal/monotime"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/wire"
 )
@@ -36,7 +36,7 @@ func newUPacketPacker(
 // PackCoalescedPacket packs a new packet.
 // It packs an Initial / Handshake if there is data to send in these packet number spaces.
 // It should only be called before the handshake is confirmed.
-func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteCount, now time.Time, v protocol.Version) (*coalescedPacket, error) {
+func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteCount, now monotime.Time, v protocol.Version) (*coalescedPacket, error) {
 	var (
 		initialHdr, handshakeHdr, zeroRTTHdr                            *wire.ExtendedHeader
 		initialPayload, handshakePayload, zeroRTTPayload, oneRTTPayload payload
@@ -54,18 +54,13 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 			maxSize-protocol.ByteCount(initialSealer.Overhead()),
 			protocol.EncryptionInitial,
 			now,
+			false,
 			onlyAck,
-			true,
 			v,
 		)
 		if initialPayload.length > 0 {
 			size += p.longHeaderPacketLength(initialHdr, initialPayload, v) + protocol.ByteCount(initialSealer.Overhead())
 		}
-
-		// // [UQUIC]
-		// if len(initialPayload.frames) > 0 {
-		// 	fmt.Printf("onlyAck: %t, PackCoalescedPacket: %v\n", onlyAck, initialPayload.frames[0].Frame)
-		// }
 	}
 
 	// Add a Handshake packet.
@@ -81,8 +76,8 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 				maxSize-size-protocol.ByteCount(handshakeSealer.Overhead()),
 				protocol.EncryptionHandshake,
 				now,
+				false,
 				onlyAck,
-				size == 0,
 				v,
 			)
 			if handshakePayload.length > 0 {
@@ -108,7 +103,7 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 			connID = p.getDestConnID()
 			oneRTTPacketNumber, oneRTTPacketNumberLen = p.pnManager.PeekPacketNumber(protocol.Encryption1RTT)
 			hdrLen := wire.ShortHeaderLen(connID, oneRTTPacketNumberLen)
-			oneRTTPayload = p.maybeGetShortHeaderPacket(oneRTTSealer, hdrLen, maxSize-size, onlyAck, size == 0, now, v)
+			oneRTTPayload = p.maybeGetShortHeaderPacket(oneRTTSealer, hdrLen, maxSize-size, onlyAck, now, v)
 			if oneRTTPayload.length > 0 {
 				size += p.shortHeaderPacketLength(connID, oneRTTPacketNumberLen, oneRTTPayload) + protocol.ByteCount(oneRTTSealer.Overhead())
 			}
@@ -181,11 +176,6 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 
 // [UQUIC]
 func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.ExtendedHeader, pl payload, encLevel protocol.EncryptionLevel, sealer sealer, v protocol.Version) (*longHeaderPacket, error) {
-	// Shouldn't need this?
-	// if p.uSpec.InitialPacketSpec.InitPacketNumberLength > 0 {
-	// 	header.PacketNumberLen = p.uSpec.InitialPacketSpec.InitPacketNumberLength
-	// }
-
 	uPayload, err := p.MarshalInitialPacketPayload(pl, v)
 	if err != nil {
 		return nil, err
@@ -204,14 +194,8 @@ func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.E
 	payloadOffset := protocol.ByteCount(len(raw))
 	raw = append(raw, uPayload...)
 
-	// fmt.Printf("Payload: %x\n", raw[payloadOffset:])
-
-	// fmt.Printf("Pre-Encryption: %x\n", raw)
-
 	raw = p.encryptPacket(raw, sealer, header.PacketNumber, payloadOffset, pnLen)
 	buffer.Data = buffer.Data[:len(buffer.Data)+len(raw)]
-
-	// fmt.Printf("Post-Encryption: %x\n", raw)
 
 	// [UQUIC]
 	// append zero to buffer.Data until min size is reached
@@ -277,10 +261,11 @@ func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.Versi
 	return p.uSpec.InitialPacketSpec.FrameBuilder.Build(cryptoData)
 }
 
-func (p *uPacketPacker) MaybePackPTOProbePacket(
+func (p *uPacketPacker) PackPTOProbePacket(
 	encLevel protocol.EncryptionLevel,
 	maxPacketSize protocol.ByteCount,
-	now time.Time,
+	addPingIfEmpty bool,
+	now monotime.Time,
 	v protocol.Version,
 ) (*coalescedPacket, error) {
 	if encLevel == protocol.Encryption1RTT {
@@ -324,7 +309,7 @@ func (p *uPacketPacker) MaybePackPTOProbePacket(
 	default:
 		panic("unknown encryption level")
 	}
-	hdr, pl := p.maybeGetCryptoPacket(maxPacketSize-protocol.ByteCount(sealer.Overhead()), encLevel, now, false, true, v)
+	hdr, pl := p.maybeGetCryptoPacket(maxPacketSize-protocol.ByteCount(sealer.Overhead()), encLevel, now, addPingIfEmpty, false, v)
 	if pl.length == 0 {
 		return nil, nil
 	}

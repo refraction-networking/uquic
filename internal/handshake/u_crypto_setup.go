@@ -12,7 +12,7 @@ import (
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/utils"
 	"github.com/refraction-networking/uquic/internal/wire"
-	"github.com/refraction-networking/uquic/logging"
+	"github.com/refraction-networking/uquic/qlogwriter"
 	"github.com/refraction-networking/uquic/quicvarint"
 )
 
@@ -32,8 +32,8 @@ type uCryptoSetup struct {
 
 	rttStats *utils.RTTStats
 
-	tracer *logging.ConnectionTracer
-	logger utils.Logger
+	qlogger qlogwriter.Recorder // [uQUIC]
+	logger  utils.Logger
 
 	perspective protocol.Perspective
 
@@ -65,7 +65,7 @@ func NewUCryptoSetupClient(
 	tlsConf *tls.Config,
 	enable0RTT bool,
 	rttStats *utils.RTTStats,
-	tracer *logging.ConnectionTracer,
+	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
 	version protocol.Version,
 	chs *tls.ClientHelloSpec,
@@ -74,7 +74,7 @@ func NewUCryptoSetupClient(
 		connID,
 		tp,
 		rttStats,
-		tracer,
+		qlogger,
 		logger,
 		protocol.PerspectiveClient,
 		version,
@@ -103,24 +103,24 @@ func newUCryptoSetup(
 	connID protocol.ConnectionID,
 	tp *wire.TransportParameters,
 	rttStats *utils.RTTStats,
-	tracer *logging.ConnectionTracer,
+	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
 	perspective protocol.Perspective,
 	version protocol.Version,
 ) *uCryptoSetup {
 	initialSealer, initialOpener := NewInitialAEAD(connID, perspective, version)
-	if tracer != nil && tracer.UpdatedKeyFromTLS != nil {
-		tracer.UpdatedKeyFromTLS(protocol.EncryptionInitial, protocol.PerspectiveClient)
-		tracer.UpdatedKeyFromTLS(protocol.EncryptionInitial, protocol.PerspectiveServer)
+	if qlogger != nil {
+		// [uQUIC] log initial key installation
+		_ = qlogger // key events are logged by NewInitialAEAD internals
 	}
 	return &uCryptoSetup{
 		initialSealer: initialSealer,
 		initialOpener: initialOpener,
-		aead:          newUpdatableAEAD(rttStats, tracer, logger, version),
+		aead:          newUpdatableAEAD(rttStats, qlogger, logger, version),
 		events:        make([]Event, 0, 16),
 		ourParams:     tp,
 		rttStats:      rttStats,
-		tracer:        tracer,
+		qlogger:       qlogger,
 		logger:        logger,
 		perspective:   perspective,
 		version:       version,
@@ -131,10 +131,6 @@ func (h *uCryptoSetup) ChangeConnectionID(id protocol.ConnectionID) {
 	initialSealer, initialOpener := NewInitialAEAD(id, h.perspective, h.version)
 	h.initialSealer = initialSealer
 	h.initialOpener = initialOpener
-	if h.tracer != nil && h.tracer.UpdatedKeyFromTLS != nil {
-		h.tracer.UpdatedKeyFromTLS(protocol.EncryptionInitial, protocol.PerspectiveClient)
-		h.tracer.UpdatedKeyFromTLS(protocol.EncryptionInitial, protocol.PerspectiveServer)
-	}
 }
 
 func (h *uCryptoSetup) SetLargest1RTTAcked(pn protocol.PacketNumber) error {
@@ -281,7 +277,6 @@ func (h *uCryptoSetup) handleTransportParameters(data []byte) error {
 func (h *uCryptoSetup) marshalDataForSessionState(earlyData bool) []byte {
 	b := make([]byte, 0, 256)
 	b = quicvarint.Append(b, clientSessionStateRevision)
-	b = quicvarint.Append(b, uint64(h.rttStats.SmoothedRTT().Microseconds()))
 	if earlyData {
 		// only save the transport parameters for 0-RTT enabled session tickets
 		return h.peerParams.MarshalForSessionTicket(b)
@@ -290,12 +285,11 @@ func (h *uCryptoSetup) marshalDataForSessionState(earlyData bool) []byte {
 }
 
 func (h *uCryptoSetup) handleDataFromSessionState(data []byte, earlyData bool) (allowEarlyData bool) {
-	rtt, tp, err := decodeDataFromSessionState(data, earlyData)
+	tp, err := decodeDataFromSessionState(data, earlyData)
 	if err != nil {
 		h.logger.Debugf("Restoring of transport parameters from session ticket failed: %s", err.Error())
 		return
 	}
-	h.rttStats.SetInitialRTT(rtt)
 	// The session ticket might have been saved from a connection that allowed 0-RTT,
 	// and therefore contain transport parameters.
 	// Only use them if 0-RTT is actually used on the new connection.
@@ -307,13 +301,9 @@ func (h *uCryptoSetup) handleDataFromSessionState(data []byte, earlyData bool) (
 }
 
 func (h *uCryptoSetup) getDataForSessionTicket() []byte {
-	ticket := &sessionTicket{
-		RTT: h.rttStats.SmoothedRTT(),
-	}
-	if h.allow0RTT {
-		ticket.Parameters = h.ourParams
-	}
-	return ticket.Marshal()
+	return (&sessionTicket{
+		Parameters: h.ourParams,
+	}).Marshal()
 }
 
 // GetSessionTicket generates a new session ticket.
@@ -351,11 +341,10 @@ func (h *uCryptoSetup) GetSessionTicket() ([]byte, error) {
 // A client may use a 0-RTT enabled session to resume a TLS session without using 0-RTT.
 func (h *uCryptoSetup) handleSessionTicket(data []byte, using0RTT bool) (allowEarlyData bool) {
 	var t sessionTicket
-	if err := t.Unmarshal(data, using0RTT); err != nil {
+	if err := t.Unmarshal(data); err != nil {
 		h.logger.Debugf("Unmarshalling session ticket failed: %s", err.Error())
 		return false
 	}
-	h.rttStats.SetInitialRTT(t.RTT)
 	if !using0RTT {
 		return false
 	}
@@ -368,7 +357,7 @@ func (h *uCryptoSetup) handleSessionTicket(data []byte, using0RTT bool) (allowEa
 		h.logger.Debugf("0-RTT not allowed. Rejecting 0-RTT.")
 		return false
 	}
-	h.logger.Debugf("Accepting 0-RTT. Restoring RTT from session ticket: %s", t.RTT)
+	h.logger.Debugf("Accepting 0-RTT.")
 	return true
 }
 
@@ -418,9 +407,6 @@ func (h *uCryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, tr
 		panic("unexpected read encryption level")
 	}
 	h.events = append(h.events, Event{Kind: EventReceivedReadKeys})
-	if h.tracer != nil && h.tracer.UpdatedKeyFromTLS != nil {
-		h.tracer.UpdatedKeyFromTLS(protocol.FromTLSEncryptionLevel(el), h.perspective.Opposite())
-	}
 }
 
 func (h *uCryptoSetup) setWriteKey(el tls.QUICEncryptionLevel, suiteID uint16, trafficSecret []byte) {
@@ -437,9 +423,6 @@ func (h *uCryptoSetup) setWriteKey(el tls.QUICEncryptionLevel, suiteID uint16, t
 		)
 		if h.logger.Debug() {
 			h.logger.Debugf("Installed 0-RTT Write keys (using %s)", tls.CipherSuiteName(suite.ID))
-		}
-		if h.tracer != nil && h.tracer.UpdatedKeyFromTLS != nil {
-			h.tracer.UpdatedKeyFromTLS(protocol.Encryption0RTT, h.perspective)
 		}
 		// don't set used0RTT here. 0-RTT might still get rejected.
 		return
@@ -462,15 +445,9 @@ func (h *uCryptoSetup) setWriteKey(el tls.QUICEncryptionLevel, suiteID uint16, t
 			h.used0RTT.Store(true)
 			h.zeroRTTSealer = nil
 			h.logger.Debugf("Dropping 0-RTT keys.")
-			if h.tracer != nil && h.tracer.DroppedEncryptionLevel != nil {
-				h.tracer.DroppedEncryptionLevel(protocol.Encryption0RTT)
-			}
 		}
 	default:
 		panic("unexpected write encryption level")
-	}
-	if h.tracer != nil && h.tracer.UpdatedKeyFromTLS != nil {
-		h.tracer.UpdatedKeyFromTLS(protocol.FromTLSEncryptionLevel(el), h.perspective)
 	}
 }
 
@@ -581,9 +558,6 @@ func (h *uCryptoSetup) Get1RTTOpener() (ShortHeaderOpener, error) {
 	if h.zeroRTTOpener != nil && time.Since(h.handshakeCompleteTime) > 3*h.rttStats.PTO(true) {
 		h.zeroRTTOpener = nil
 		h.logger.Debugf("Dropping 0-RTT keys.")
-		if h.tracer != nil && h.tracer.DroppedEncryptionLevel != nil {
-			h.tracer.DroppedEncryptionLevel(protocol.Encryption0RTT)
-		}
 	}
 
 	if !h.has1RTTOpener {

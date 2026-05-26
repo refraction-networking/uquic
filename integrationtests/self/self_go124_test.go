@@ -2,7 +2,7 @@
 
 package self_test
 
-import "crypto/tls"
+import tls "github.com/refraction-networking/utls" // [uQUIC]
 
 func getCurveID(connState tls.ConnectionState) tls.CurveID {
 	return 0

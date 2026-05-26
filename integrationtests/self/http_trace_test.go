@@ -2,7 +2,7 @@ package self_test
 
 import (
 	"context"
-	"crypto/tls"
+	ctls "crypto/tls" // [uQUIC] net/http/httptrace uses crypto/tls.ConnectionState
 	"fmt"
 	"net"
 	"net/http"
@@ -48,7 +48,7 @@ func TestHTTPClientTrace(t *testing.T) {
 			eventQueue <- event{Key: "ConnectDone", Args: map[string]any{"network": network, "addr": addr, "err": err}}
 		},
 		TLSHandshakeStart: func() { eventQueue <- event{Key: "TLSHandshakeStart"} },
-		TLSHandshakeDone: func(state tls.ConnectionState, err error) {
+		TLSHandshakeDone: func(state ctls.ConnectionState, err error) {
 			eventQueue <- event{Key: "TLSHandshakeDone", Args: map[string]any{"state": state, "err": err}}
 		},
 		WroteHeaderField: func(key string, value []string) {
@@ -118,7 +118,7 @@ func TestHTTPClientTrace(t *testing.T) {
 			require.Nil(t, e.Args.(map[string]any)["err"])
 		case "TLSHandshakeDone":
 			require.Nil(t, e.Args.(map[string]any)["err"])
-			state := e.Args.(map[string]any)["state"].(tls.ConnectionState)
+			state := e.Args.(map[string]any)["state"].(ctls.ConnectionState)
 			require.Equal(t, 1, len(state.PeerCertificates))
 			require.Equal(t, "localhost", state.PeerCertificates[0].DNSNames[0])
 		case "WroteHeaderField":

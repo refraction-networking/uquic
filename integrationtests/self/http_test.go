@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/tls"
+	tls "github.com/refraction-networking/utls" // [uQUIC]
 	"errors"
 	"fmt"
 	"io"

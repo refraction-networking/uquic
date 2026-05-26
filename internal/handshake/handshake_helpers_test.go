@@ -1,7 +1,7 @@
 package handshake
 
 import (
-	"crypto/tls"
+	tls "github.com/refraction-networking/utls" // [uQUIC]
 	"encoding/hex"
 	"strings"
 	"testing"

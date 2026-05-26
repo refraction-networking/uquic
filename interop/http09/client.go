@@ -2,7 +2,7 @@ package http09
 
 import (
 	"context"
-	"crypto/tls"
+	tls "github.com/refraction-networking/utls" // [uQUIC]
 	"errors"
 	"io"
 	"log"

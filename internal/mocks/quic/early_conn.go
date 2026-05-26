@@ -311,10 +311,10 @@ func (c *MockEarlyConnectionLocalAddrCall) DoAndReturn(f func() net.Addr) *MockE
 }
 
 // NextConnection mocks base method.
-func (m *MockEarlyConnection) NextConnection(arg0 context.Context) (quic.Connection, error) {
+func (m *MockEarlyConnection) NextConnection(arg0 context.Context) (*quic.Conn, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "NextConnection", arg0)
-	ret0, _ := ret[0].(quic.Connection)
+	ret0, _ := ret[0].(*quic.Conn)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -332,19 +332,19 @@ type MockEarlyConnectionNextConnectionCall struct {
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockEarlyConnectionNextConnectionCall) Return(arg0 quic.Connection, arg1 error) *MockEarlyConnectionNextConnectionCall {
+func (c *MockEarlyConnectionNextConnectionCall) Return(arg0 *quic.Conn, arg1 error) *MockEarlyConnectionNextConnectionCall {
 	c.Call = c.Call.Return(arg0, arg1)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockEarlyConnectionNextConnectionCall) Do(f func(context.Context) (quic.Connection, error)) *MockEarlyConnectionNextConnectionCall {
+func (c *MockEarlyConnectionNextConnectionCall) Do(f func(context.Context) (*quic.Conn, error)) *MockEarlyConnectionNextConnectionCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockEarlyConnectionNextConnectionCall) DoAndReturn(f func(context.Context) (quic.Connection, error)) *MockEarlyConnectionNextConnectionCall {
+func (c *MockEarlyConnectionNextConnectionCall) DoAndReturn(f func(context.Context) (*quic.Conn, error)) *MockEarlyConnectionNextConnectionCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

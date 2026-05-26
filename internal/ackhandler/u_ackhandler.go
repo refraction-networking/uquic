@@ -3,22 +3,26 @@ package ackhandler
 import (
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/utils"
-	"github.com/refraction-networking/uquic/logging"
+	"github.com/refraction-networking/uquic/qlogwriter"
 )
 
-// [UQUIC]
+// [UQUIC] NewUAckHandler creates a uSentPacketHandler that allows controlling the Initial
+// packet number length. It only returns the SentPacketHandler; ReceivedPacketHandler is
+// initialized separately by preSetup() in the connection struct.
 func NewUAckHandler(
 	initialPacketNumber protocol.PacketNumber,
 	initialMaxDatagramSize protocol.ByteCount,
 	rttStats *utils.RTTStats,
+	connStats *utils.ConnectionStats,
 	clientAddressValidated bool,
 	enableECN bool,
+	ignorePacketsBelow func(protocol.PacketNumber),
 	pers protocol.Perspective,
-	tracer *logging.ConnectionTracer,
+	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
-) (SentPacketHandler, ReceivedPacketHandler) {
-	sph := newSentPacketHandler(initialPacketNumber, initialMaxDatagramSize, rttStats, clientAddressValidated, enableECN, pers, tracer, logger)
+) SentPacketHandler {
+	sph := NewSentPacketHandler(initialPacketNumber, initialMaxDatagramSize, rttStats, connStats, clientAddressValidated, enableECN, ignorePacketsBelow, pers, qlogger, logger)
 	return &uSentPacketHandler{
-		sentPacketHandler: sph,
-	}, newReceivedPacketHandler(sph, logger)
+		sentPacketHandler: sph.(*sentPacketHandler),
+	}
 }

@@ -2,8 +2,10 @@ package handshake
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
+
+	// [uQUIC] use utls instead of stdlib crypto/tls for API compatibility with utls-based connections
+	tls "github.com/refraction-networking/utls"
 	"fmt"
 	"net"
 	"strings"

@@ -3,7 +3,8 @@ package quic
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
+	// [uQUIC] use utls instead of crypto/tls for API compatibility with utls-based connections
+	tls "github.com/refraction-networking/utls"
 	"errors"
 	"fmt"
 	"io"
