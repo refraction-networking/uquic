@@ -77,7 +77,7 @@ func areTransportsRunning() bool {
 var _ = AfterEach(func() {
 	mockCtrl.Finish()
 	Eventually(areServersRunning).Should(BeFalse())
-	Eventually(areTransportsRunning()).Should(BeFalse())
+	Eventually(areTransportsRunning).Should(BeFalse())
 })
 
 func TestMain(m *testing.M) {

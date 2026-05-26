@@ -22,6 +22,7 @@ func testDialPanic(t *testing.T, id QUICID) {
 	}
 
 	tr := &UTransport{Transport: &Transport{Conn: pktConn}, QUICSpec: &quicSpec}
+	defer tr.Transport.Close() // [uQUIC] close transport so the listen goroutine exits
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
