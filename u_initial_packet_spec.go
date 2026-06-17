@@ -14,7 +14,19 @@ type InitialPacketSpec struct {
 	// InitPacketNumberLength specifies how many bytes should the InitPacketNumber
 	// be interpreted as. It is usually 1 or 2 bytes. If unset, UQUIC will use the
 	// default algorithm to compute the length which is at least 2 bytes.
+	//
+	// Deprecated: Use InitPacketNumberLengths for per-packet control. This field is
+	// ignored when InitPacketNumberLengths is non-empty.
 	InitPacketNumberLength PacketNumberLen
+
+	// InitPacketNumberLengths specifies the PN encoding length for each successive
+	// Initial packet. Entry [0] applies to PN=InitPacketNumber, [1] to the next
+	// Initial packet, etc. If the packet index exceeds the slice length, the last
+	// entry repeats. Overrides InitPacketNumberLength when non-empty.
+	//
+	// Example (Chrome 146): []PacketNumberLen{1, 2} — 1-byte encoding for PN=1,
+	// 2-byte encoding for PN=2.
+	InitPacketNumberLengths []PacketNumberLen // [UQUIC]
 
 	// InitPacketNumber is the packet number of the first Initial packet. Following
 	// Initial packets, if any, will increment the Packet Number accordingly.
@@ -32,8 +44,12 @@ type InitialPacketSpec struct {
 	// invalid since not assigned by the server.
 	ClientTokenLength int
 
-	// FrameBuilder specifies how the frames should be encapsulated for the first Initial
+	// FrameBuilder specifies how the frames should be encapsulated for each Initial
 	// packet.
+	//
+	// If FrameBuilder implements QUICFrameBuilderEx, BuildForDatagram is called once
+	// per Initial datagram with the datagram index and base CRYPTO stream offset,
+	// enabling correct multi-datagram fingerprinting (e.g. Chrome 146 with two Initials).
 	//
 	// If nil, there will be only one single Crypto frame in the first Initial packet.
 	FrameBuilder QUICFrameBuilder

@@ -12,23 +12,50 @@ import (
 	"github.com/refraction-networking/uquic/quicvarint"
 )
 
+// QUICFrameBuilder builds QUIC Initial packet frames from TLS crypto data.
 type QUICFrameBuilder interface {
 	// Build ingests data from crypto frames without the crypto frame header
 	// and returns the byte representation of all frames.
 	Build(cryptoData []byte) (allFrames []byte, err error)
 }
 
-// QUICFrames is a slice of QUICFrame that implements QUICFrameBuilder.
+// QUICFrameBuilderEx extends QUICFrameBuilder with N-datagram support.
+// BuildForDatagram is called once per Initial datagram by uPacketPacker:
+//   - datagramIdx: 0-based index of this datagram (0 = first Initial packet)
+//   - cryptoData: the CRYPTO bytes assigned to this datagram's slice of the crypto stream
+//   - baseOffset: absolute QUIC crypto stream offset of cryptoData[0]
+//
+// Implementations must produce CRYPTO frame wire offsets = (local_offset + baseOffset).
+// Existing single-datagram specs (Chrome 115, Firefox 116) implement QUICFrameBuilder
+// only; uPacketPacker falls back to Build() when QUICFrameBuilderEx is not implemented.
+type QUICFrameBuilderEx interface {
+	QUICFrameBuilder
+	BuildForDatagram(datagramIdx int, cryptoData []byte, baseOffset uint64) (allFrames []byte, err error)
+}
+
+// QUICFrames is a slice of QUICFrame that implements QUICFrameBuilder and QUICFrameBuilderEx.
 // It could be used to deterministically build QUIC Frames from crypto data.
 type QUICFrames []QUICFrame
 
 // Build ingests data from crypto frames without the crypto frame header
 // and returns the byte representation of all frames as specified in
-// the slice.
+// the slice. Equivalent to BuildForDatagram(0, cryptoData, 0).
 func (qfs QUICFrames) Build(cryptoData []byte) (payload []byte, err error) {
+	return qfs.build(cryptoData, 0)
+}
+
+// BuildForDatagram implements QUICFrameBuilderEx.
+// baseOffset is added to every CRYPTO frame wire offset, enabling correct
+// absolute crypto stream positions for datagrams beyond the first.
+func (qfs QUICFrames) BuildForDatagram(_ int, cryptoData []byte, baseOffset uint64) ([]byte, error) {
+	return qfs.build(cryptoData, baseOffset)
+}
+
+// build is the internal implementation shared by Build and BuildForDatagram.
+func (qfs QUICFrames) build(cryptoData []byte, baseOffset uint64) (payload []byte, err error) {
 	if len(qfs) == 0 { // If no frames specified, send a single crypto frame
 		qfsCryptoOnly := QUICFrames{QUICFrameCrypto{0, 0}}
-		return qfsCryptoOnly.Build(cryptoData)
+		return qfsCryptoOnly.build(cryptoData, baseOffset)
 	}
 
 	lowestOffset := math.MaxUint16
@@ -47,7 +74,9 @@ func (qfs QUICFrames) Build(cryptoData []byte) (payload []byte, err error) {
 				length = len(cryptoData) - lengthOffset
 			}
 			frameBytes = []byte{0x06} // CRYPTO frame type
-			frameBytes = quicvarint.Append(frameBytes, uint64(offset))
+			// Wire offset = local offset + baseOffset for correct multi-datagram stream positioning.
+			wireOffset := uint64(offset) + baseOffset
+			frameBytes = quicvarint.Append(frameBytes, wireOffset)
 			frameBytes = quicvarint.Append(frameBytes, uint64(length))
 			frameCryptoData := make([]byte, length)
 			copy(frameCryptoData, cryptoData[lengthOffset:]) // copy at most length bytes
@@ -96,7 +125,8 @@ type QUICFrame interface {
 // QUICFrameCrypto is used to specify the crypto frames containing the TLS ClientHello
 // to be sent in the first Initial packet.
 type QUICFrameCrypto struct {
-	// Offset is used to specify the starting offset of the crypto frame.
+	// Offset is used to specify the starting offset of the crypto frame,
+	// relative to the start of the crypto data slice for this datagram.
 	// Used when sending multiple crypto frames in a single packet.
 	//
 	// Multiple crypto frames in a single packet must not overlap and must
@@ -163,6 +193,10 @@ func (q QUICFramePing) Read() ([]byte, error) {
 // crypto data. A caller may specify how many PING and CRYPTO frames are expected
 // to be included in the Initial Packet, as well as the total length plus PADDING
 // frames in the end.
+//
+// QUICRandomFrames implements both QUICFrameBuilder and QUICFrameBuilderEx.
+// When used as a FrameBuilder for multi-datagram Initials, each datagram gets
+// independently randomized fragmentation with correct absolute CRYPTO offsets.
 type QUICRandomFrames struct {
 	// MinPING specifies the inclusive lower bound of the number of PING frames to be
 	// included in the Initial Packet.
@@ -197,8 +231,21 @@ type QUICRandomFrames struct {
 
 // Build ingests data from crypto frames without the crypto frame header
 // and returns the byte representation of all frames as specified in
-// the slice.
+// the slice. Equivalent to BuildForDatagram(0, cryptoData, 0).
 func (qrf *QUICRandomFrames) Build(cryptoData []byte) (payload []byte, err error) {
+	return qrf.buildInternal(cryptoData, 0)
+}
+
+// BuildForDatagram implements QUICFrameBuilderEx.
+// datagramIdx is available for future per-datagram configuration (currently ignored;
+// all datagrams use the same randomization parameters).
+// baseOffset is added to every CRYPTO frame wire offset for correct multi-datagram positioning.
+func (qrf *QUICRandomFrames) BuildForDatagram(_ int, cryptoData []byte, baseOffset uint64) ([]byte, error) {
+	return qrf.buildInternal(cryptoData, baseOffset)
+}
+
+// buildInternal is the shared implementation for Build and BuildForDatagram.
+func (qrf *QUICRandomFrames) buildInternal(cryptoData []byte, baseOffset uint64) (payload []byte, err error) {
 	// check all bounds
 	if qrf.MinPING > qrf.MaxPING {
 		return nil, errors.New("MinPING must be less than or equal to MaxPING")
@@ -263,7 +310,8 @@ func (qrf *QUICRandomFrames) Build(cryptoData []byte) (payload []byte, err error
 	frameList = append(frameList, QUICFrameCrypto{Offset: int(offsetCryptoData), Length: 0}) // 0 means the remaining
 
 	// dry-run to determine the total length of all frames so far
-	dryrunPayload, err := frameList.Build(cryptoData)
+	// Use baseOffset=0 for the dry-run since we only care about byte count, not wire offsets.
+	dryrunPayload, err := frameList.build(cryptoData, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +338,7 @@ func (qrf *QUICRandomFrames) Build(cryptoData []byte) (payload []byte, err error
 			lenPADDING -= lenPADDINGFrame
 		}
 
-		// append the last CRYPTO frame
+		// append the last PADDING frame
 		frameList = append(frameList, QUICFramePadding{Length: int(lenPADDING)}) // 0 means the remaining
 	}
 
@@ -299,6 +347,42 @@ func (qrf *QUICRandomFrames) Build(cryptoData []byte) (payload []byte, err error
 		frameList[i], frameList[j] = frameList[j], frameList[i]
 	})
 
-	// build the payload
-	return frameList.Build(cryptoData)
+	// build the payload with the correct base offset for multi-datagram support
+	return frameList.build(cryptoData, baseOffset)
+}
+
+// QUICMultiDatagramFrames implements QUICFrameBuilderEx with per-datagram configuration.
+// It enables different PING/CRYPTO/PADDING distributions for each Initial datagram,
+// which is useful for clients like Chrome 146 that send multiple Initial packets.
+//
+// TODO: Future work — pre-plan the full ClientHello fragmentation across N datagrams
+// before any datagram is sent (requires access to the full crypto stream upfront),
+// enabling exact replication of Chrome's cross-packet CRYPTO scatter pattern.
+type QUICMultiDatagramFrames struct {
+	// PerDatagram specifies the frame randomization for each Initial datagram.
+	// PerDatagram[0] is used for the first datagram, [1] for the second, etc.
+	// If datagramIdx >= len(PerDatagram), the last entry is used (repeating pattern).
+	// Must have at least one entry.
+	PerDatagram []QUICRandomFrames
+}
+
+// Build implements QUICFrameBuilder by using the first datagram's spec with baseOffset=0.
+// This provides backward compatibility when QUICFrameBuilderEx is not used.
+func (m *QUICMultiDatagramFrames) Build(cryptoData []byte) ([]byte, error) {
+	return m.BuildForDatagram(0, cryptoData, 0)
+}
+
+// BuildForDatagram implements QUICFrameBuilderEx.
+// It selects the QUICRandomFrames spec for datagramIdx (clamped to the last entry)
+// and builds frames with the given baseOffset for correct absolute CRYPTO wire offsets.
+func (m *QUICMultiDatagramFrames) BuildForDatagram(datagramIdx int, cryptoData []byte, baseOffset uint64) ([]byte, error) {
+	if len(m.PerDatagram) == 0 {
+		return nil, errors.New("QUICMultiDatagramFrames: PerDatagram must not be empty")
+	}
+	idx := datagramIdx
+	if idx >= len(m.PerDatagram) {
+		idx = len(m.PerDatagram) - 1
+	}
+	spec := m.PerDatagram[idx]
+	return spec.buildInternal(cryptoData, baseOffset)
 }

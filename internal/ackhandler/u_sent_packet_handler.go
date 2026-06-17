@@ -5,7 +5,19 @@ import "github.com/refraction-networking/uquic/internal/protocol"
 type uSentPacketHandler struct {
 	*sentPacketHandler
 
+	// initialPacketNumberLength is the PN encoding length for ALL Initial packets.
+	// Deprecated: use initialPacketNumberLengths for per-packet control.
+	// Ignored when initialPacketNumberLengths is non-empty.
 	initialPacketNumberLength protocol.PacketNumberLen // [UQUIC]
+
+	// initialPacketNumberLengths specifies the PN encoding length for each successive
+	// Initial packet. Entry [i] applies to the packet with PN = initialPacketNumberBase + i.
+	// If the computed index exceeds the slice, the last entry repeats.
+	initialPacketNumberLengths []protocol.PacketNumberLen // [UQUIC]
+
+	// initialPacketNumberBase is the PN of the first Initial packet (= InitPacketNumber).
+	// Used as the reference point for indexing into initialPacketNumberLengths.
+	initialPacketNumberBase protocol.PacketNumber // [UQUIC]
 }
 
 func (h *uSentPacketHandler) PeekPacketNumber(encLevel protocol.EncryptionLevel) (protocol.PacketNumber, protocol.PacketNumberLen) {
@@ -13,7 +25,19 @@ func (h *uSentPacketHandler) PeekPacketNumber(encLevel protocol.EncryptionLevel)
 	pn := pnSpace.pns.Peek()
 	// See section 17.1 of RFC 9000.
 
-	// [UQUIC] Otherwise it kinda breaks PN length mimicry.
+	// [UQUIC] Per-packet PN length list takes precedence over single-value override.
+	if encLevel == protocol.EncryptionInitial && len(h.initialPacketNumberLengths) > 0 {
+		idx := int(pn - h.initialPacketNumberBase)
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(h.initialPacketNumberLengths) {
+			idx = len(h.initialPacketNumberLengths) - 1
+		}
+		return pn, h.initialPacketNumberLengths[idx]
+	}
+
+	// [UQUIC] Fall back to single-value override for all Initial packets.
 	if encLevel == protocol.EncryptionInitial && h.initialPacketNumberLength != 0 {
 		return pn, h.initialPacketNumberLength
 	}
@@ -22,78 +46,22 @@ func (h *uSentPacketHandler) PeekPacketNumber(encLevel protocol.EncryptionLevel)
 	return pn, protocol.PacketNumberLengthForHeader(pn, pnSpace.largestAcked)
 }
 
-// [UQUIC]
+// SetInitialPacketNumberLength sets a single PN encoding length used for ALL Initial packets.
+// Deprecated: prefer SetInitialPacketNumberLengths for per-packet control.
 func SetInitialPacketNumberLength(h SentPacketHandler, pnLen protocol.PacketNumberLen) {
 	if sph, ok := h.(*uSentPacketHandler); ok {
 		sph.initialPacketNumberLength = pnLen
 	}
 }
 
-// func (h *uSentPacketHandler) OnLossDetectionTimeout() error {
-// 	defer h.setLossDetectionTimer()
-// 	earliestLossTime, encLevel := h.getLossTimeAndSpace()
-// 	if !earliestLossTime.IsZero() {
-// 		if h.logger.Debug() {
-// 			h.logger.Debugf("Loss detection alarm fired in loss timer mode. Loss time: %s", earliestLossTime)
-// 		}
-// 		if h.tracer != nil && h.tracer.LossTimerExpired != nil {
-// 			h.tracer.LossTimerExpired(logging.TimerTypeACK, encLevel)
-// 		}
-// 		// Early retransmit or time loss detection
-// 		return h.detectLostPackets(time.Now(), encLevel)
-// 	}
-
-// 	// PTO
-// 	// When all outstanding are acknowledged, the alarm is canceled in
-// 	// setLossDetectionTimer. This doesn't reset the timer in the session though.
-// 	// When OnAlarm is called, we therefore need to make sure that there are
-// 	// actually packets outstanding.
-// 	if h.bytesInFlight == 0 && !h.peerCompletedAddressValidation {
-// 		h.ptoCount++
-// 		h.numProbesToSend++
-// 		if h.initialPackets != nil {
-// 			h.ptoMode = SendPTOInitial
-// 		} else if h.handshakePackets != nil {
-// 			h.ptoMode = SendPTOHandshake
-// 		} else {
-// 			return errors.New("sentPacketHandler BUG: PTO fired, but bytes_in_flight is 0 and Initial and Handshake already dropped")
-// 		}
-// 		return nil
-// 	}
-
-// 	_, encLevel, ok := h.getPTOTimeAndSpace()
-// 	if !ok {
-// 		return nil
-// 	}
-// 	if ps := h.getPacketNumberSpace(encLevel); !ps.history.HasOutstandingPackets() && !h.peerCompletedAddressValidation {
-// 		return nil
-// 	}
-// 	h.ptoCount++
-// 	if h.logger.Debug() {
-// 		h.logger.Debugf("Loss detection alarm for %s fired in PTO mode. PTO count: %d", encLevel, h.ptoCount)
-// 	}
-// 	if h.tracer != nil {
-// 		if h.tracer.LossTimerExpired != nil {
-// 			h.tracer.LossTimerExpired(logging.TimerTypePTO, encLevel)
-// 		}
-// 		if h.tracer.UpdatedPTOCount != nil {
-// 			h.tracer.UpdatedPTOCount(h.ptoCount)
-// 		}
-// 	}
-// 	h.numProbesToSend += 2
-// 	//nolint:exhaustive // We never arm a PTO timer for 0-RTT packets.
-// 	switch encLevel {
-// 	case protocol.EncryptionInitial:
-// 		// h.ptoMode = SendPTOInitial // or quic-go will send fallback initial packets with different FRAME architecture
-// 	case protocol.EncryptionHandshake:
-// 		h.ptoMode = SendPTOHandshake
-// 	case protocol.Encryption1RTT:
-// 		// skip a packet number in order to elicit an immediate ACK
-// 		pn := h.PopPacketNumber(protocol.Encryption1RTT)
-// 		h.getPacketNumberSpace(protocol.Encryption1RTT).history.SkippedPacket(pn)
-// 		h.ptoMode = SendPTOAppData
-// 	default:
-// 		return fmt.Errorf("PTO timer in unexpected encryption level: %s", encLevel)
-// 	}
-// 	return nil
-// }
+// SetInitialPacketNumberLengths sets per-packet PN encoding lengths for Initial packets.
+// base is the PN of the first Initial packet (InitPacketNumber).
+// pnLens[0] applies to PN=base, pnLens[1] to PN=base+1, etc.
+// If the packet's PN index exceeds len(pnLens), the last entry repeats.
+// When set, this overrides any value set by SetInitialPacketNumberLength.
+func SetInitialPacketNumberLengths(h SentPacketHandler, base protocol.PacketNumber, pnLens []protocol.PacketNumberLen) {
+	if sph, ok := h.(*uSentPacketHandler); ok {
+		sph.initialPacketNumberBase = base
+		sph.initialPacketNumberLengths = pnLens
+	}
+}

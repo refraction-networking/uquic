@@ -3,6 +3,7 @@ package quic
 import (
 	"bytes"
 	"fmt"
+	"math"
 
 	"github.com/refraction-networking/clienthellod"
 	"github.com/refraction-networking/uquic/internal/handshake"
@@ -17,10 +18,12 @@ import (
 type uPacketPacker struct {
 	*packetPacker
 
-	// initPktNbrLen      PacketNumberLen
-	// qfs                QUICFrames // [UQUIC] uses QUICFrames to customize encrypted frames
-	// udpDatagramMinSize int
 	uSpec *QUICSpec // [UQUIC]
+
+	// initialDatagramIdx tracks how many Initial datagrams have had their payload
+	// built via MarshalInitialPacketPayload. Used by QUICFrameBuilderEx to select
+	// per-datagram configuration (e.g., different PING/CRYPTO counts per datagram).
+	initialDatagramIdx int // [UQUIC]
 }
 
 func newUPacketPacker(
@@ -249,6 +252,23 @@ func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.Versi
 		return nil, err
 	}
 
+	// [UQUIC] Compute baseOffset: the absolute QUIC crypto stream offset of cryptoData[0].
+	// For a single-datagram Initial this is always 0. For multi-datagram Initials (e.g.
+	// Chrome 146 with X25519MLKEM768, where the ClientHello spans two Initial packets),
+	// the second datagram's CRYPTO frames start at the byte after the first datagram's last
+	// byte, so baseOffset > 0. Passing this to QUICFrameBuilderEx ensures CRYPTO wire
+	// offsets are correct for all N datagrams.
+	var baseOffset uint64 = math.MaxUint64
+	for _, frame := range qchframes {
+		if cf, ok := frame.(*clienthellod.CRYPTO); ok && cf.Offset < baseOffset {
+			baseOffset = cf.Offset
+		}
+	}
+	if baseOffset == math.MaxUint64 {
+		baseOffset = 0
+	}
+
+	// Pass-through path: nil FrameBuilder or empty QUICFrames — preserve original frame layout.
 	if qf, ok := p.uSpec.InitialPacketSpec.FrameBuilder.(QUICFrames); p.uSpec.InitialPacketSpec.FrameBuilder == nil || ok && len(qf) == 0 {
 		qfs := QUICFrames{}
 		for _, frame := range qchframes {
@@ -257,6 +277,14 @@ func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.Versi
 			}
 		}
 		return qfs.Build(cryptoData)
+	}
+
+	// [UQUIC] Use QUICFrameBuilderEx if available: supports N-datagram Initials via
+	// per-datagram index and base offset. Falls back to Build() for single-datagram specs.
+	if ext, ok := p.uSpec.InitialPacketSpec.FrameBuilder.(QUICFrameBuilderEx); ok {
+		result, err := ext.BuildForDatagram(p.initialDatagramIdx, cryptoData, baseOffset)
+		p.initialDatagramIdx++ // advance after building; each call corresponds to one datagram
+		return result, err
 	}
 	return p.uSpec.InitialPacketSpec.FrameBuilder.Build(cryptoData)
 }

@@ -41,6 +41,10 @@ var (
 	QUICChrome_115_IPv6 = QUICID{quicChrome, "115_ip6", "beeb454235791d5c"} // IPv6
 	// TODO: add Chrome fingerprints with Token and PSK extension
 
+	QUICChrome_146      = QUICChrome_146_IPv4                               // IPv4 is still more popular
+	QUICChrome_146_IPv4 = QUICID{quicChrome, "146", "a3c5e1f2b7d9048a"}     // IPv4: 2-datagram Initial (X25519MLKEM768 key share)
+	QUICChrome_146_IPv6 = QUICID{quicChrome, "146_ip6", "c2d8f3a1e6b05794"} // IPv6
+
 	// TODO: add more QUIC clients and versions
 )
 
@@ -652,9 +656,265 @@ func QUICID2Spec(id QUICID) (QUICSpec, error) {
 			},
 			UDPDatagramMinSize: 1357,
 		}, nil
+	case QUICChrome_146_IPv4:
+		// Chrome 146 sends 2 Initial datagrams because the ClientHello (~1734 bytes with
+		// X25519MLKEM768's 1216-byte key share) exceeds a single QUIC Initial payload.
+		// quic-go automatically splits the CRYPTO stream; QUICRandomFrames.Length controls
+		// per-datagram payload size. Per-packet PN encoding: 1 byte for PN=1, 2 bytes for PN=2.
+		return QUICSpec{
+			InitialPacketSpec: InitialPacketSpec{
+				SrcConnIDLength:  0,
+				DestConnIDLength: 8,
+				// Per-packet PN encoding lengths observed in the Chrome 146 reference pcap:
+				//   Packet 1 (PN=1): 1-byte encoding
+				//   Packet 2 (PN=2): 2-byte encoding
+				// InitPacketNumberLength is intentionally left 0; InitPacketNumberLengths takes precedence.
+				InitPacketNumber:        1, // Chrome starts at 1
+				InitPacketNumberLengths: []PacketNumberLen{1, 2},
+				ClientTokenLength:       0,
+				FrameBuilder: &QUICRandomFrames{
+					// Informed by single pcap sample:
+					//   Packet 1: 3 PINGs, ~11 CRYPTOs, 4 PADDINGs
+					//   Packet 2: 2 PINGs, 6 CRYPTOs, 3 PADDINGs
+					// Chrome heavily fragments CRYPTO across multiple frames; randomize within range.
+					MinPING:    1,
+					MaxPING:    4,
+					MinCRYPTO:  6,
+					MaxCRYPTO:  14,
+					MinPADDING: 2,
+					MaxPADDING: 6,
+					Length:     1231 - 16, // QUIC payload target: 1231 bytes; 16-byte AEAD auth tag
+				},
+			},
+			ClientHelloSpec: &tls.ClientHelloSpec{
+				TLSVersMin: tls.VersionTLS13,
+				TLSVersMax: tls.VersionTLS13,
+				CipherSuites: []uint16{
+					// QUIC-only: TLS 1.3 suites only, no GREASE, no TLS 1.2 suites
+					tls.TLS_AES_128_GCM_SHA256,
+					tls.TLS_AES_256_GCM_SHA384,
+					tls.TLS_CHACHA20_POLY1305_SHA256,
+				},
+				CompressionMethods: []uint8{
+					0x0, // no compression
+				},
+				Extensions: tls.ShuffleChromeTLSExtensions([]tls.TLSExtension{
+					ShuffleQUICTransportParameters(&tls.QUICTransportParametersExtension{
+						TransportParameters: tls.TransportParameters{
+							// Observed QTP order (shuffled per connection):
+							// 0x06 initial_max_stream_data_bidi_remote
+							// 0x20 max_datagram_frame_size
+							// 0x11 version_information
+							// 0x03 max_udp_payload_size
+							// 0x01 max_idle_timeout
+							// 0x3127 google_initial_rtt (new in Chrome 146)
+							// 0x04 initial_max_data
+							// 0x07 initial_max_stream_data_uni
+							// 0x0f initial_source_connection_id
+							// GREASE
+							// 0x3128 google_connection_options ("10AF", changed from "RVCM" in Chrome 115)
+							// 0x05 initial_max_stream_data_bidi_local
+							// 0x08 initial_max_streams_bidi
+							// 0x09 initial_max_streams_uni
+							// Note: 0x4752 (google_quic_version) was removed vs Chrome 115
+							tls.InitialMaxStreamDataBidiRemote(6291456),
+							tls.MaxDatagramFrameSize(65536),
+							&tls.VersionInformation{
+								ChoosenVersion: tls.VERSION_1,
+								AvailableVersions: []uint32{
+									tls.VERSION_GREASE,
+									tls.VERSION_1,
+								},
+								LegacyID: true,
+							},
+							tls.MaxUDPPayloadSize(1472),
+							tls.MaxIdleTimeout(30000),
+							ChromeRandomInitialRTT(), // 0x3127: random 1000–20000 µs per connection
+							tls.InitialMaxData(15728640),
+							tls.InitialMaxStreamDataUni(6291456),
+							tls.InitialSourceConnectionID([]byte{}),
+							VariableLengthGREASEQTP(0x10),
+							&tls.FakeQUICTransportParameter{ // 0x3128 google_connection_options
+								Id:  0x3128,
+								Val: []byte{0x31, 0x30, 0x41, 0x46}, // "10AF" (was "RVCM" in Chrome 115)
+							},
+							tls.InitialMaxStreamDataBidiLocal(6291456),
+							tls.InitialMaxStreamsBidi(100),
+							tls.InitialMaxStreamsUni(103),
+						},
+					}),
+					&tls.ALPNExtension{
+						AlpnProtocols: []string{"h3"},
+					},
+					&tls.KeyShareExtension{
+						KeyShares: []tls.KeyShare{
+							{Group: tls.X25519MLKEM768}, // post-quantum hybrid (causes 2-datagram Initial)
+							{Group: tls.X25519},
+						},
+					},
+					&tls.SupportedCurvesExtension{
+						Curves: []tls.CurveID{
+							tls.X25519MLKEM768,
+							tls.CurveX25519,
+							tls.CurveSECP256R1,
+							tls.CurveSECP384R1,
+						},
+					},
+					&tls.PSKKeyExchangeModesExtension{
+						Modes: []uint8{tls.PskModeDHE},
+					},
+					&tls.SignatureAlgorithmsExtension{
+						SupportedSignatureAlgorithms: []tls.SignatureScheme{
+							tls.ECDSAWithP256AndSHA256,
+							tls.PSSWithSHA256,
+							tls.PKCS1WithSHA256,
+							tls.ECDSAWithP384AndSHA384,
+							tls.PSSWithSHA384,
+							tls.PKCS1WithSHA384,
+							tls.PSSWithSHA512,
+							tls.PKCS1WithSHA512,
+							tls.PKCS1WithSHA1,
+						},
+					},
+					&tls.UtlsCompressCertExtension{
+						Algorithms: []tls.CertCompressionAlgo{tls.CertCompressionBrotli},
+					},
+					tls.BoringGREASEECH(), // GREASE ECH outer (new in Chrome 133+)
+					&tls.ApplicationSettingsExtensionNew{ // 0x44cd (new codepoint, Chrome 133+)
+						SupportedProtocols: []string{"h3"},
+					},
+					&tls.SupportedVersionsExtension{
+						Versions: []uint16{tls.VersionTLS13},
+					},
+					&tls.SNIExtension{},
+				}),
+			},
+			// No UDPDatagramMinSize: QUICRandomFrames.Length already pads each datagram to ~1232 bytes.
+		}, nil
+	case QUICChrome_146_IPv6:
+		// IPv6 variant: identical to IPv4 except the datagram payload target is 20 bytes shorter,
+		// matching Chrome's observed behavior (IPv6 header is 20 bytes larger than IPv4).
+		return QUICSpec{
+			InitialPacketSpec: InitialPacketSpec{
+				SrcConnIDLength:         0,
+				DestConnIDLength:        8,
+				InitPacketNumber:        1,
+				InitPacketNumberLengths: []PacketNumberLen{1, 2},
+				ClientTokenLength:       0,
+				FrameBuilder: &QUICRandomFrames{
+					MinPING:    1,
+					MaxPING:    4,
+					MinCRYPTO:  6,
+					MaxCRYPTO:  14,
+					MinPADDING: 2,
+					MaxPADDING: 6,
+					Length:     1211 - 16, // 20 bytes shorter than IPv4 (IPv6 header overhead)
+				},
+			},
+			ClientHelloSpec: &tls.ClientHelloSpec{
+				TLSVersMin: tls.VersionTLS13,
+				TLSVersMax: tls.VersionTLS13,
+				CipherSuites: []uint16{
+					tls.TLS_AES_128_GCM_SHA256,
+					tls.TLS_AES_256_GCM_SHA384,
+					tls.TLS_CHACHA20_POLY1305_SHA256,
+				},
+				CompressionMethods: []uint8{0x0},
+				Extensions: tls.ShuffleChromeTLSExtensions([]tls.TLSExtension{
+					ShuffleQUICTransportParameters(&tls.QUICTransportParametersExtension{
+						TransportParameters: tls.TransportParameters{
+							tls.InitialMaxStreamDataBidiRemote(6291456),
+							tls.MaxDatagramFrameSize(65536),
+							&tls.VersionInformation{
+								ChoosenVersion: tls.VERSION_1,
+								AvailableVersions: []uint32{
+									tls.VERSION_GREASE,
+									tls.VERSION_1,
+								},
+								LegacyID: true,
+							},
+							tls.MaxUDPPayloadSize(1472),
+							tls.MaxIdleTimeout(30000),
+							ChromeRandomInitialRTT(),
+							tls.InitialMaxData(15728640),
+							tls.InitialMaxStreamDataUni(6291456),
+							tls.InitialSourceConnectionID([]byte{}),
+							VariableLengthGREASEQTP(0x10),
+							&tls.FakeQUICTransportParameter{
+								Id:  0x3128,
+								Val: []byte{0x31, 0x30, 0x41, 0x46}, // "10AF"
+							},
+							tls.InitialMaxStreamDataBidiLocal(6291456),
+							tls.InitialMaxStreamsBidi(100),
+							tls.InitialMaxStreamsUni(103),
+						},
+					}),
+					&tls.ALPNExtension{
+						AlpnProtocols: []string{"h3"},
+					},
+					&tls.KeyShareExtension{
+						KeyShares: []tls.KeyShare{
+							{Group: tls.X25519MLKEM768},
+							{Group: tls.X25519},
+						},
+					},
+					&tls.SupportedCurvesExtension{
+						Curves: []tls.CurveID{
+							tls.X25519MLKEM768,
+							tls.CurveX25519,
+							tls.CurveSECP256R1,
+							tls.CurveSECP384R1,
+						},
+					},
+					&tls.PSKKeyExchangeModesExtension{
+						Modes: []uint8{tls.PskModeDHE},
+					},
+					&tls.SignatureAlgorithmsExtension{
+						SupportedSignatureAlgorithms: []tls.SignatureScheme{
+							tls.ECDSAWithP256AndSHA256,
+							tls.PSSWithSHA256,
+							tls.PKCS1WithSHA256,
+							tls.ECDSAWithP384AndSHA384,
+							tls.PSSWithSHA384,
+							tls.PKCS1WithSHA384,
+							tls.PSSWithSHA512,
+							tls.PKCS1WithSHA512,
+							tls.PKCS1WithSHA1,
+						},
+					},
+					&tls.UtlsCompressCertExtension{
+						Algorithms: []tls.CertCompressionAlgo{tls.CertCompressionBrotli},
+					},
+					tls.BoringGREASEECH(),
+					&tls.ApplicationSettingsExtensionNew{
+						SupportedProtocols: []string{"h3"},
+					},
+					&tls.SupportedVersionsExtension{
+						Versions: []uint16{tls.VersionTLS13},
+					},
+					&tls.SNIExtension{},
+				}),
+			},
+		}, nil
 	default:
 		return QUICSpec{}, fmt.Errorf("unknown QUIC ID: %v", id)
 	}
+}
+
+// ChromeRandomInitialRTT returns a FakeQUICTransportParameter for google_initial_rtt (0x3127).
+// Chrome 146 includes this parameter with a random realistic RTT value in microseconds.
+// The observed value in the reference pcap was 7740 µs; the range 1000–20000 µs covers
+// typical network conditions. Value is encoded as a 2-byte QUIC varint (high bits = 0b01).
+func ChromeRandomInitialRTT() *tls.FakeQUICTransportParameter {
+	const minRTT, maxRTT = 1000, 20000
+	r, err := rand.Int(rand.Reader, big.NewInt(maxRTT-minRTT))
+	if err != nil {
+		panic(err)
+	}
+	rtt := uint16(minRTT + r.Int64())
+	// 2-byte QUIC varint: top 2 bits = 01, remaining 14 bits = value
+	val := []byte{byte(0x40 | byte(rtt>>8)), byte(rtt)}
+	return &tls.FakeQUICTransportParameter{Id: 0x3127, Val: val}
 }
 
 func ShuffleTLSExtensions(exts []tls.TLSExtension) []tls.TLSExtension {
