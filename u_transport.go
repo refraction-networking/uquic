@@ -28,16 +28,12 @@ func (t *UTransport) DialEarly(ctx context.Context, addr net.Addr, tlsConf *tls.
 }
 
 func (t *UTransport) dial(ctx context.Context, addr net.Addr, host string, tlsConf *tls.Config, conf *Config, use0RTT bool) (*Conn, error) {
-	if err := t.init(t.isSingleUse); err != nil {
-		return nil, err
-	}
-	if err := validateConfig(conf); err != nil {
-		return nil, err
-	}
-	conf = populateConfig(conf)
-
 	// [UQUIC]
-	// Override the default connection ID generator if the user has specified a length in QUICSpec.
+	// Set the source connection ID generator from the spec BEFORE init(). init()
+	// caches t.ConnectionIDGenerator into the internal t.connIDGenerator (which
+	// doDial uses to generate the source connection ID), so setting it afterwards
+	// had no effect — SrcConnIDLength (including 0 → empty SCID) was silently
+	// ignored and the SCID always got the default length.
 	if t.QUICSpec != nil {
 		if t.QUICSpec.InitialPacketSpec.SrcConnIDLength != 0 {
 			t.ConnectionIDGenerator = &protocol.DefaultConnectionIDGenerator{ConnLen: t.QUICSpec.InitialPacketSpec.SrcConnIDLength}
@@ -46,6 +42,14 @@ func (t *UTransport) dial(ctx context.Context, addr net.Addr, host string, tlsCo
 		}
 	}
 	// [/UQUIC]
+
+	if err := t.init(t.isSingleUse); err != nil {
+		return nil, err
+	}
+	if err := validateConfig(conf); err != nil {
+		return nil, err
+	}
+	conf = populateConfig(conf)
 
 	tlsConf = tlsConf.Clone()
 	setTLSConfigServerName(tlsConf, addr, host)
@@ -74,7 +78,16 @@ func (t *UTransport) doDial(
 	if err != nil {
 		return nil, err
 	}
-	destConnID, err := generateConnectionIDForInitial()
+	// [UQUIC] Honor the spec's DestConnIDLength for the initial (client-chosen)
+	// destination connection ID; fall back to a random-length one otherwise.
+	// Without this, InitialPacketSpec.DestConnIDLength was silently ignored and
+	// the initial DCID got a random length, making the fingerprint unstable.
+	var destConnID protocol.ConnectionID
+	if t.QUICSpec != nil && t.QUICSpec.InitialPacketSpec.DestConnIDLength > 0 {
+		destConnID, err = generateConnectionIDForInitialWithLength(t.QUICSpec.InitialPacketSpec.DestConnIDLength)
+	} else {
+		destConnID, err = generateConnectionIDForInitial()
+	}
 	if err != nil {
 		return nil, err
 	}
