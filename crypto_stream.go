@@ -137,6 +137,20 @@ func (s *initialCryptoStream) HasData() bool {
 	return s.baseCryptoStream.HasData()
 }
 
+// DisableScrambling turns off anti-DPI ClientHello scrambling for this stream.
+//
+// [UQUIC] uQUIC calls this when a QUICSpec dictates the Initial framing. Scrambling
+// cuts the CRYPTO stream at the SNI/ECH and defers those bytes to a later packet,
+// which makes the per-datagram CRYPTO frames non-contiguous. The spec re-framing
+// path (uPacketPacker.MarshalInitialPacketPayload → ReassembleCRYPTOFrames) requires
+// contiguous per-datagram CRYPTO and aborts otherwise — intermittently breaking
+// multi-datagram Initials such as Chrome 146 (X25519MLKEM768). When a spec is in
+// force its FrameBuilder is the authoritative source of fragmentation, so the two
+// mechanisms conflict; the spec wins.
+func (s *initialCryptoStream) DisableScrambling() {
+	s.scramble = false
+}
+
 func (s *initialCryptoStream) Write(p []byte) (int, error) {
 	s.writeBuf = append(s.writeBuf, p...)
 	if !s.scramble {

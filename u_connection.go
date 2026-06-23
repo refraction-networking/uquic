@@ -69,6 +69,12 @@ var newUClientConnection = func(
 	)
 	s.ctx, s.ctxCancel = context.WithCancelCause(ctx)
 	s.preSetup()
+	// [UQUIC] A QUICSpec is authoritative over the Initial CRYPTO framing (via
+	// InitialPacketSpec.FrameBuilder), and uPacketPacker re-frames every Initial
+	// datagram. The upstream anti-DPI ClientHello scrambler would cut the stream at
+	// the SNI/ECH, producing non-contiguous CRYPTO frames that the re-framing path
+	// cannot reassemble (breaks multi-datagram Initials, e.g. Chrome 146). Disable it.
+	s.initialStream.DisableScrambling()
 	s.sentPacketHandler = ackhandler.NewUAckHandler(
 		initialPacketNumber,
 		protocol.ByteCount(s.config.InitialPacketSize),

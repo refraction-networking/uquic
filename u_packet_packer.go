@@ -10,6 +10,7 @@ import (
 	"github.com/refraction-networking/uquic/internal/monotime"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/wire"
+	"github.com/refraction-networking/uquic/quicvarint"
 )
 
 // uPacketPacker is an extended packetPacker which is used
@@ -53,8 +54,31 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 	}
 	var size protocol.ByteCount
 	if initialSealer != nil {
+		initialMaxSize := maxSize - protocol.ByteCount(initialSealer.Overhead())
+		// [UQUIC] Cap the CRYPTO popped for this Initial datagram so the spec can pin the
+		// CRYPTO split offset and leave room for PADDING. hdrLen is computed the same way
+		// maybeGetCryptoPacket computes it (header Length unset → 1-byte varint), so the
+		// budget arithmetic below cancels exactly. Two sources, in priority order:
+		//   1. InitialPackets[idx].CryptoLength — an exact per-datagram CRYPTO byte count
+		//      (fixes the next datagram's CRYPTO offset; e.g. Chrome splits at 999), or
+		//   2. a QUICRandomFrames padding request — reserve a little room so PADDING fits.
+		hdrLen := p.getLongHeader(protocol.EncryptionInitial, v).GetLength(v)
+		if plan := p.uSpec.InitialPacketSpec.planFor(p.initialDatagramIdx); plan.CryptoLength > 0 {
+			off := uint64(p.initialStream.writeOffset)
+			cl := protocol.ByteCount(plan.CryptoLength)
+			cryptoFrame := 1 + protocol.ByteCount(quicvarint.Len(off)) +
+				protocol.ByteCount(quicvarint.Len(uint64(cl))) + cl // type + offset + length + data
+			if budget := hdrLen + cryptoFrame; budget > 0 && budget < initialMaxSize {
+				initialMaxSize = budget
+			}
+		} else if rf, ok := p.uSpec.InitialPacketSpec.FrameBuilder.(*QUICRandomFrames); ok && rf.Length > 0 && rf.MinPADDING >= 1 {
+			const paddingReserve = 16 // leave at least this many bytes for PADDING frames
+			if budget := hdrLen + protocol.ByteCount(rf.Length) - paddingReserve; budget > 0 && budget < initialMaxSize {
+				initialMaxSize = budget
+			}
+		}
 		initialHdr, initialPayload = p.maybeGetCryptoPacket(
-			maxSize-protocol.ByteCount(initialSealer.Overhead()),
+			initialMaxSize,
 			protocol.EncryptionInitial,
 			now,
 			false,
@@ -179,12 +203,28 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 
 // [UQUIC]
 func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.ExtendedHeader, pl payload, encLevel protocol.EncryptionLevel, sealer sealer, v protocol.Version) (*longHeaderPacket, error) {
+	idx := p.initialDatagramIdx // [UQUIC] capture before MarshalInitialPacketPayload increments it
 	uPayload, err := p.MarshalInitialPacketPayload(pl, v)
 	if err != nil {
 		return nil, err
 	}
 
 	pnLen := protocol.ByteCount(header.PacketNumberLen)
+
+	// [UQUIC] Exact-size padding: append PADDING (0x00) bytes to the payload so the
+	// serialized Initial packet equals InitialPackets[idx].PacketSize. These bytes are
+	// inside the AEAD, so they decode as PADDING frames — unlike the UDPDatagramMinSize
+	// trailing zeros, which sit outside the QUIC packet and don't change [Packet Length].
+	plan := p.uSpec.InitialPacketSpec.planFor(idx)
+	if plan.PacketSize > 0 {
+		target := protocol.ByteCount(plan.PacketSize)
+		header.Length = target // size the Length varint for the final packet
+		cur := header.GetLength(v) + protocol.ByteCount(len(uPayload)) + protocol.ByteCount(sealer.Overhead())
+		if target > cur {
+			uPayload = append(uPayload, make([]byte, target-cur)...)
+		}
+	}
+
 	header.Length = pnLen + protocol.ByteCount(sealer.Overhead()) + protocol.ByteCount(len(uPayload))
 
 	startLen := len(buffer.Data)
@@ -201,13 +241,17 @@ func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.E
 	buffer.Data = buffer.Data[:len(buffer.Data)+len(raw)]
 
 	// [UQUIC]
-	// append zero to buffer.Data until min size is reached
-	minUDPSize := p.uSpec.UDPDatagramMinSize
-	if minUDPSize == 0 {
-		minUDPSize = DefaultUDPDatagramMinSize
-	}
-	if len(buffer.Data) < minUDPSize {
-		buffer.Data = append(buffer.Data, make([]byte, minUDPSize-len(buffer.Data))...)
+	// append zero to buffer.Data until min size is reached. Skipped when this datagram
+	// has an exact PacketSize: that size is already achieved with in-payload PADDING, and
+	// trailing post-AEAD zeros would push the UDP datagram past the intended packet size.
+	if plan.PacketSize == 0 {
+		minUDPSize := p.uSpec.UDPDatagramMinSize
+		if minUDPSize == 0 {
+			minUDPSize = DefaultUDPDatagramMinSize
+		}
+		if len(buffer.Data) < minUDPSize {
+			buffer.Data = append(buffer.Data, make([]byte, minUDPSize-len(buffer.Data))...)
+		}
 	}
 
 	if pn := p.pnManager.PopPacketNumber(encLevel); pn != header.PacketNumber {

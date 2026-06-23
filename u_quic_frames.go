@@ -266,6 +266,14 @@ func (qrf *QUICRandomFrames) buildInternal(cryptoData []byte, baseOffset uint64)
 	var frameList QUICFrames = make([]QUICFrame, 0)
 
 	var cryptoSafeRandUint64 = func(min, max uint64) (uint64, error) {
+		// A degenerate range [n, n] (or an inverted one) means a fixed value, not a
+		// random draw — return min directly. crypto/rand.Int panics when its argument
+		// is <= 0, so this also guards against that crash. This is what lets a spec
+		// pin an exact frame count, e.g. MinPING==MaxPING==0 for "no PING frames"
+		// (Min==Max passes the buildInternal bounds checks, which only reject Min>Max).
+		if max <= min {
+			return min, nil
+		}
 		minMaxDiff := big.NewInt(int64(max - min))
 		offset, err := rand.Int(rand.Reader, minMaxDiff)
 		if err != nil {

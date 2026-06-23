@@ -53,6 +53,43 @@ type InitialPacketSpec struct {
 	//
 	// If nil, there will be only one single Crypto frame in the first Initial packet.
 	FrameBuilder QUICFrameBuilder
+
+	// InitialPackets, when non-empty, pins the per-datagram fragmentation of the
+	// Initial flight: entry [i] controls the i-th Initial datagram. This lets a spec
+	// reproduce a client whose Initials have specific CRYPTO split offsets and exact
+	// wire sizes — e.g. Chrome's X25519MLKEM768 flight of two 1200-byte Initials with
+	// the ClientHello split at CRYPTO offset 999:
+	//
+	//	[]InitialPacketPlan{{CryptoLength: 999, PacketSize: 1200}, {PacketSize: 1200}}
+	//
+	// If the datagram index exceeds the slice length, the last entry repeats. [UQUIC]
+	InitialPackets []InitialPacketPlan
+}
+
+// InitialPacketPlan pins, for one Initial datagram, how much of the CRYPTO stream it
+// carries and the exact QUIC packet (UDP payload) size it is padded to. See
+// InitialPacketSpec.InitialPackets. [UQUIC]
+type InitialPacketPlan struct {
+	// CryptoLength caps the CRYPTO data bytes placed in this datagram, which fixes
+	// the next datagram's CRYPTO offset (the split point). 0 = all remaining CRYPTO.
+	CryptoLength int
+
+	// PacketSize forces the exact serialized QUIC packet size (UDP payload bytes) by
+	// padding the payload with PADDING frames. 0 = no exact-size padding. Must leave
+	// room: the CRYPTO assigned to this datagram (+ header/AEAD) must not exceed it.
+	PacketSize int
+}
+
+// planFor returns the InitialPacketPlan for datagram index idx (last entry repeats),
+// or a zero plan if none is configured.
+func (ps *InitialPacketSpec) planFor(idx int) InitialPacketPlan {
+	if len(ps.InitialPackets) == 0 {
+		return InitialPacketPlan{}
+	}
+	if idx >= len(ps.InitialPackets) {
+		idx = len(ps.InitialPackets) - 1
+	}
+	return ps.InitialPackets[idx]
 }
 
 func (ps *InitialPacketSpec) UpdateConfig(conf *Config) {
