@@ -20,6 +20,16 @@ type QUICSpec struct {
 	// If the UDP Datagram is smaller than this size, zeros will be padded to the end
 	// of the UDP Datagram until this size is reached.
 	UDPDatagramMinSize int
+
+	// RandomizeTransportParameters, when true, shuffles the QUIC transport parameters
+	// (the ClientHelloSpec's QUICTransportParametersExtension list) into a uniformly
+	// random permutation per connection, before they are serialized into the Initial
+	// CRYPTO stream. This mirrors real Chrome, which randomizes the QTP wire order on
+	// every handshake; without it the parameter order is fixed by the spec and becomes
+	// a trivial discriminator signal. The shuffle reorders the extension's parameter
+	// slice in place at connection-setup time (so a freshly built spec randomizes each
+	// connection); it does not change which parameters or values are sent.
+	RandomizeTransportParameters bool
 }
 
 func (s *QUICSpec) UpdateConfig(config *Config) {
