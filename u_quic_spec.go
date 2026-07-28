@@ -1,6 +1,10 @@
 package quic
 
-import tls "github.com/refraction-networking/utls"
+import (
+	"slices"
+
+	tls "github.com/refraction-networking/utls"
+)
 
 const (
 	DefaultUDPDatagramMinSize = 1200
@@ -30,6 +34,62 @@ type QUICSpec struct {
 	// slice in place at connection-setup time (so a freshly built spec randomizes each
 	// connection); it does not change which parameters or values are sent.
 	RandomizeTransportParameters bool
+
+	// SuppressTransportParameters lists QUIC transport parameter IDs to drop from the
+	// ClientHelloSpec's QUICTransportParametersExtension before it is serialized into
+	// the Initial CRYPTO stream. It lets a caller pin the exact on-wire parameter set
+	// — most usefully by starting from a parrot (or any shared spec) and removing
+	// parameters, instead of restating the whole list.
+	//
+	// An entry of QTPGrease (27) removes every GREASE-valued parameter (31*N+27), since
+	// QUIC fingerprinters bucket all GREASE IDs into that one canonical ID; other
+	// entries match the parameter ID exactly. Suppression runs before
+	// RandomizeTransportParameters, so the shuffled set is exactly the wire set, and
+	// the connection's own view of its parameters is populated from the filtered list.
+	//
+	// Suppressing a parameter the peer requires (e.g. initial_source_connection_id)
+	// produces a ClientHello a conformant server will reject. That is allowed on
+	// purpose — mimicry sometimes needs it — but it is the caller's responsibility.
+	SuppressTransportParameters []uint64
+}
+
+// TransportParameterIDs returns the QUIC transport parameter IDs this spec will put on
+// the wire, in the canonical form QUIC fingerprinters use: every GREASE ID (31*N+27) is
+// folded to QTPGrease and the result is sorted ascending. SuppressTransportParameters is
+// applied, so this is what a dial would actually send. It returns nil if the spec has no
+// ClientHelloSpec or no QUICTransportParametersExtension.
+//
+// Duplicates are deliberately kept, because they are the whole point: a spec listing both
+// an explicit tls.FakeQUICTransportParameter{Id: 0x1b} and a GREASE parameter emits two
+// distinct IDs on the wire, but a fingerprinter canonicalizes both to 27 and sees it
+// twice. That collision is invisible in the spec source and otherwise only surfaces in a
+// packet capture. Compare this slice against a target fingerprint's parameter ID list to
+// catch it before dialing.
+//
+// Calling this pins each GREASE parameter's ID, which is drawn randomly on first use, so
+// a subsequent dial sends exactly the IDs reported here.
+func (s *QUICSpec) TransportParameterIDs() []uint64 {
+	if s.ClientHelloSpec == nil {
+		return nil
+	}
+	for _, ext := range s.ClientHelloSpec.Extensions {
+		qtp, ok := ext.(*tls.QUICTransportParametersExtension)
+		if !ok {
+			continue
+		}
+		SuppressQUICTransportParameters(qtp, s.SuppressTransportParameters)
+		ids := make([]uint64, 0, len(qtp.TransportParameters))
+		for _, tp := range qtp.TransportParameters {
+			id := tp.ID()
+			if IsGREASEQTPID(id) {
+				id = QTPGrease
+			}
+			ids = append(ids, id)
+		}
+		slices.Sort(ids)
+		return ids
+	}
+	return nil
 }
 
 func (s *QUICSpec) UpdateConfig(config *Config) {

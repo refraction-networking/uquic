@@ -114,13 +114,19 @@ var newUClientConnection = func(
 				params = &wire.TransportParameters{
 					InitialSourceConnectionID: srcConnID,
 				}
-				// [UQUIC] Real Chrome randomizes the QUIC transport parameter wire
-				// order on every handshake. When the spec opts in, shuffle the
-				// extension's parameters into a fresh uniformly random permutation
-				// per connection so the order can't be used as a discriminator
-				// signal. uTLS serializes ext.TransportParameters directly into the
-				// ClientHello (the wire) via ApplyPreset, so we must shuffle that
-				// exact slice — before ApplyPreset caches its marshaled form below.
+				// [UQUIC] uTLS serializes ext.TransportParameters directly into the
+				// ClientHello (the wire) via ApplyPreset below, and caches the marshaled
+				// bytes on first use — so both of the rewrites here must happen now, on
+				// that exact slice.
+				//
+				// Drop suppressed parameters first, so what follows (the shuffle, and
+				// PopulateFromUQUIC's view of our own parameters) sees exactly the set
+				// that goes on the wire.
+				SuppressQUICTransportParameters(ext, uSpec.SuppressTransportParameters)
+				// Real Chrome randomizes the QUIC transport parameter wire order on
+				// every handshake. When the spec opts in, shuffle the extension's
+				// parameters into a fresh uniformly random permutation per connection so
+				// the order can't be used as a discriminator signal.
 				if uSpec.RandomizeTransportParameters {
 					ShuffleQUICTransportParameters(ext)
 				}

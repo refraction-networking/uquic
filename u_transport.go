@@ -51,13 +51,28 @@ func (t *UTransport) dial(ctx context.Context, addr net.Addr, host string, tlsCo
 	}
 	conf = populateConfig(conf)
 
+	// [UQUIC] Apply spec-driven Config overrides now that conf is fully populated.
+	// In particular this installs the TokenStore derived from
+	// InitialPacketSpec.ClientTokenLength, so the Initial packet's Token field is
+	// honored (otherwise UpdateConfig is never called and the token is always empty).
+	//
+	// Seed the Initial packet number space from the spec for the same reason: this is
+	// the only place the first Initial's PN is chosen, and it was hardcoded to 0, so
+	// InitPacketNumber never reached the wire (it only served as the index base for
+	// InitPacketNumberLengths). Chrome's first Initial is PN=1.
+	var initialPN protocol.PacketNumber
+	if t.QUICSpec != nil {
+		t.QUICSpec.UpdateConfig(conf)
+		initialPN = t.QUICSpec.InitialPacketSpec.initialPN()
+	}
+
 	tlsConf = tlsConf.Clone()
 	setTLSConfigServerName(tlsConf, addr, host)
 	return t.doDial(ctx,
 		newSendConn(t.conn, addr, packetInfo{}, utils.DefaultLogger),
 		tlsConf,
 		conf,
-		0,
+		initialPN,
 		false,
 		use0RTT,
 		conf.Versions[0],

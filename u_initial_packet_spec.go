@@ -2,6 +2,8 @@ package quic
 
 import (
 	"crypto/rand"
+
+	"github.com/refraction-networking/uquic/internal/protocol"
 )
 
 type InitialPacketSpec struct {
@@ -92,8 +94,27 @@ func (ps *InitialPacketSpec) planFor(idx int) InitialPacketPlan {
 	return ps.InitialPackets[idx]
 }
 
+// initialPN returns the packet number the first Initial packet must carry, i.e. the
+// value the Initial packet number space is seeded with at dial time. Chrome starts its
+// Initial flight at PN=1 rather than 0 — most visibly when a token is present, since a
+// client that already got a Retry has necessarily sent a PN=0 Initial before it — so a
+// spec that sets InitPacketNumber must have that value reach the wire, not just serve as
+// the index base for InitPacketNumberLengths. [UQUIC]
+func (ps *InitialPacketSpec) initialPN() protocol.PacketNumber {
+	const maxPN = uint64(1)<<62 - 1 // RFC 9000 §17.1: packet numbers are in [0, 2^62-1]
+	if ps.InitPacketNumber > maxPN {
+		return 0
+	}
+	return protocol.PacketNumber(ps.InitPacketNumber)
+}
+
 func (ps *InitialPacketSpec) UpdateConfig(conf *Config) {
-	conf.TokenStore = ps.getTokenStore()
+	// Only override the Config's TokenStore when the spec actually provides one
+	// (an explicit TokenStore or a ClientTokenLength). Otherwise leave any
+	// user-supplied conf.TokenStore intact instead of clobbering it with nil.
+	if ts := ps.getTokenStore(); ts != nil {
+		conf.TokenStore = ts
+	}
 }
 
 func (ps *InitialPacketSpec) getTokenStore() TokenStore {

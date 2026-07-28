@@ -3,6 +3,7 @@ package quic
 import (
 	"crypto/rand"
 	"fmt"
+	"math"
 	"math/big"
 	mrand "math/rand"
 
@@ -932,10 +933,70 @@ func ShuffleQUICTransportParameters(qtp *tls.QUICTransportParametersExtension) *
 	return qtp
 }
 
+// QTPGrease is the canonical ID QUIC fingerprinters use for every GREASE transport
+// parameter (the reserved IDs are 31*N+27, of which 27 is the smallest). Pass it in
+// QUICSpec.SuppressTransportParameters to drop GREASE parameters whatever ID they drew.
+const QTPGrease uint64 = 27
+
+// IsGREASEQTPID reports whether id is one of the reserved GREASE transport parameter
+// IDs, i.e. 31*N+27 for some N >= 0. See RFC 9000 §18.1.
+func IsGREASEQTPID(id uint64) bool {
+	return id >= QTPGrease && (id-QTPGrease)%31 == 0
+}
+
+// SuppressQUICTransportParameters removes from qtp every transport parameter whose ID
+// is listed in suppress, returning qtp for chaining. A suppress entry of QTPGrease
+// matches every GREASE ID, not just 27 — fingerprinters canonicalize them all to 27, so
+// suppressing "27" has to mean "the GREASE parameter" to be useful.
+//
+// This mutates qtp.TransportParameters in place and must therefore run before uTLS
+// marshals the extension (it caches the result on the first Len() call). It is
+// idempotent, so re-applying it to a reused spec is harmless.
+func SuppressQUICTransportParameters(qtp *tls.QUICTransportParametersExtension, suppress []uint64) *tls.QUICTransportParametersExtension {
+	if qtp == nil || len(suppress) == 0 {
+		return qtp
+	}
+
+	var suppressGREASE bool
+	ids := make(map[uint64]struct{}, len(suppress))
+	for _, id := range suppress {
+		if id == QTPGrease {
+			suppressGREASE = true
+			continue
+		}
+		ids[id] = struct{}{}
+	}
+
+	kept := qtp.TransportParameters[:0]
+	for _, tp := range qtp.TransportParameters {
+		// ID() is not pure for GREASE parameters: the first call draws and memoizes the
+		// random ID, so call it once and reuse the value.
+		id := tp.ID()
+		if _, drop := ids[id]; drop {
+			continue
+		}
+		if suppressGREASE && IsGREASEQTPID(id) {
+			continue
+		}
+		kept = append(kept, tp)
+	}
+	qtp.TransportParameters = kept
+	return qtp
+}
+
+// VariableLengthGREASEQTP returns a GREASE transport parameter carrying a random number
+// of random bytes, uniform over [0, maxLen). Chrome's GREASE parameter varies in length
+// between handshakes, so a fixed length is itself a fingerprint.
 func VariableLengthGREASEQTP(maxLen int) *tls.GREASETransportParameter {
+	if maxLen <= 1 {
+		return &tls.GREASETransportParameter{}
+	}
+	if maxLen > math.MaxUint16 {
+		maxLen = math.MaxUint16
+	}
+
 	// get random length for GREASE
-	greaseMaxLen := big.NewInt(0x10)
-	greaseLen, err := rand.Int(rand.Reader, greaseMaxLen)
+	greaseLen, err := rand.Int(rand.Reader, big.NewInt(int64(maxLen)))
 	if err != nil {
 		panic(err)
 	}
