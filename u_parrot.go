@@ -10,6 +10,11 @@ import (
 	tls "github.com/refraction-networking/utls"
 )
 
+// QUICID names one built-in client fingerprint that QUICID2Spec can expand into a
+// ready-made QUICSpec — the QUIC-layer analogue of uTLS's ClientHelloID. The package
+// vars below (QUICChrome_146, QUICFirefox_116, …) are the available IDs; a client with
+// several observed variants gets one ID per variant, with the unsuffixed name aliasing
+// the most common one.
 type QUICID struct {
 	Client string
 
@@ -49,6 +54,14 @@ var (
 	// TODO: add more QUIC clients and versions
 )
 
+// QUICID2Spec returns the QUICSpec that mimics the client named by id, or an error for
+// an unknown ID. Each call builds a fresh spec, so per-spec random draws (GREASE
+// parameter IDs and lengths, ChromeRandomInitialRTT) are re-drawn — call it per
+// connection rather than caching one result if those values must vary.
+//
+// The returned spec is a starting point, not a frozen artifact: mutate its fields, or
+// set QUICSpec.SuppressTransportParameters, to derive a variant without restating the
+// whole parameter list.
 func QUICID2Spec(id QUICID) (QUICSpec, error) {
 	switch id {
 	case QUICChrome_115_IPv4:
@@ -918,6 +931,10 @@ func ChromeRandomInitialRTT() *tls.FakeQUICTransportParameter {
 	return &tls.FakeQUICTransportParameter{Id: 0x3127, Val: val}
 }
 
+// ShuffleTLSExtensions permutes exts uniformly at random, in place, and returns it.
+// Every extension moves, including ones real clients keep pinned — GREASE, padding and
+// pre_shared_key (which RFC 8446 requires last). For a Chrome-shaped ClientHello use
+// utls.ShuffleChromeTLSExtensions instead, which holds those positions fixed.
 func ShuffleTLSExtensions(exts []tls.TLSExtension) []tls.TLSExtension {
 	mrand.Shuffle(len(exts), func(i, j int) {
 		exts[i], exts[j] = exts[j], exts[i]
@@ -925,6 +942,18 @@ func ShuffleTLSExtensions(exts []tls.TLSExtension) []tls.TLSExtension {
 	return exts
 }
 
+// ShuffleQUICTransportParameters permutes qtp's transport parameters uniformly at
+// random, in place, returning qtp for chaining. Real Chrome randomizes the QTP wire
+// order on every handshake, so a fixed order is a trivial discriminator signal.
+//
+// Prefer QUICSpec.RandomizeTransportParameters over calling this directly: the spec
+// field runs the same shuffle at connection setup, which re-randomizes every dial even
+// when one spec value is reused, and it runs after SuppressTransportParameters so the
+// shuffled set is exactly the wire set. Calling this from spec-construction code only
+// randomizes as often as the spec is rebuilt.
+//
+// Like SuppressQUICTransportParameters, this mutates qtp.TransportParameters and must
+// run before uTLS marshals the extension, which caches its bytes on the first Len().
 func ShuffleQUICTransportParameters(qtp *tls.QUICTransportParametersExtension) *tls.QUICTransportParametersExtension {
 	// shuffle the order of parameters
 	mrand.Shuffle(len(qtp.TransportParameters), func(i, j int) {

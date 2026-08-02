@@ -10,6 +10,24 @@ const (
 	DefaultUDPDatagramMinSize = 1200
 )
 
+// QUICSpec is the complete description of the QUIC Initial flight a UTransport
+// emits: the Initial packet's header and framing (InitialPacketSpec), the TLS
+// ClientHello carried in its CRYPTO stream (ClientHelloSpec), and the datagram-level
+// and transport-parameter knobs below. It is the QUIC-layer analogue of uTLS's
+// ClientHelloSpec — everything a fingerprinter can observe about the flight should be
+// reachable from here.
+//
+// Assign one to UTransport.QUICSpec before dialing:
+//
+//	ut := &quic.UTransport{Transport: &quic.Transport{Conn: pc}, QUICSpec: spec}
+//	conn, err := ut.Dial(ctx, addr, tlsConf, conf)
+//
+// Fields that randomize per connection (RandomizeTransportParameters, a
+// QUICRandomFrames FrameBuilder, ClientTokenPrefix's random tail) are re-drawn on
+// every dial, so one spec value can serve many connections. Fields whose value is
+// itself random — a GREASE transport parameter's ID, VariableLengthGREASEQTP's
+// length — are drawn once when the spec is built, so build a fresh spec per
+// connection if those must vary too.
 type QUICSpec struct {
 	// InitialPacketSpec specifies the QUIC Initial Packet, which includes Initial
 	// Packet Headers and Frames.
@@ -92,6 +110,11 @@ func (s *QUICSpec) TransportParameterIDs() []uint64 {
 	return nil
 }
 
+// UpdateConfig applies the spec's Config-level overrides to config — currently the
+// TokenStore derived from InitialPacketSpec (see InitialPacketSpec.UpdateConfig).
+// UTransport.dial calls this after populateConfig and before dialing; a spec field
+// that has to reach the connection through Config must be wired in here, or it will
+// be silently ignored no matter what the spec sets.
 func (s *QUICSpec) UpdateConfig(config *Config) {
 	s.InitialPacketSpec.UpdateConfig(config)
 }

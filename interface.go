@@ -40,6 +40,15 @@ type ClientToken struct {
 	rtt  time.Duration
 }
 
+// NewClientToken returns a ClientToken carrying the given bytes. It exists for
+// TokenStore implementations outside this package that synthesize a token instead of
+// replaying a server-issued one — e.g. to reproduce a target client's Initial token.
+// ClientToken's fields are unexported, so without this such a store cannot produce a
+// non-empty token at all. The bytes are copied. [UQUIC]
+func NewClientToken(data []byte) *ClientToken {
+	return &ClientToken{data: slices.Clone(data)}
+}
+
 type TokenStore interface {
 	// Pop searches for a ClientToken associated with the given key.
 	// Since tokens are not supposed to be reused, it must remove the token from the cache.

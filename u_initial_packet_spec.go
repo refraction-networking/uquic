@@ -6,6 +6,21 @@ import (
 	"github.com/refraction-networking/uquic/internal/protocol"
 )
 
+// InitialPacketSpec describes everything about the QUIC Initial flight except the
+// ClientHello itself: the long header's connection IDs, packet numbers and token, how
+// the CRYPTO stream is cut into frames, and how those frames are spread across
+// datagrams. It is the QUIC-header half of a QUICSpec.
+//
+// The fields fall into three groups:
+//
+//   - Long header: SrcConnIDLength, DestConnIDLength, InitPacketNumber,
+//     InitPacketNumberLengths, and the token (TokenStore / ClientTokenLength /
+//     ClientTokenPrefix).
+//   - Framing inside a packet: FrameBuilder.
+//   - Datagram layout of the flight: InitialPackets.
+//
+// The zero value produces a default-shaped Initial: a single datagram carrying one
+// CRYPTO frame, no token, and library-chosen connection ID lengths.
 type InitialPacketSpec struct {
 	// SrcConnIDLength specifies how many bytes should the SrcConnID be
 	SrcConnIDLength int
@@ -36,6 +51,12 @@ type InitialPacketSpec struct {
 
 	// TokenStore is used to store and retrieve tokens. If set, will override the
 	// one set in the Config.
+	//
+	// Use this when the token must be computed per connection rather than described
+	// statically — ClientTokenLength and ClientTokenPrefix cover the common cases and
+	// need no implementation. NewClientToken builds the *ClientToken to return from
+	// Pop; ClientToken's fields are unexported, so a store outside this package
+	// cannot construct one any other way.
 	TokenStore TokenStore
 
 	// If ClientTokenLength is set when TokenStore is not set, a dummy TokenStore
@@ -45,6 +66,24 @@ type InitialPacketSpec struct {
 	// However, the tokens will not be stored anywhere and are expected to be
 	// invalid since not assigned by the server.
 	ClientTokenLength int
+
+	// ClientTokenPrefix pins the leading bytes of the generated token; the rest stays
+	// random and is regenerated per connection. A real token is a server-issued opaque
+	// blob, but its first bytes are typically a fixed version/type prefix — Chrome's
+	// tokens from Google servers are 70 bytes starting with 0x00 — so a token that is
+	// random all the way to byte 0 is a trivial tell.
+	//
+	// The token is ClientTokenPrefix followed by random bytes, up to whichever of
+	// ClientTokenLength and len(ClientTokenPrefix) is larger. The prefix is never
+	// truncated, so putting the whole token here (with ClientTokenLength unset) sends
+	// exactly those bytes on every connection:
+	//
+	//	ClientTokenPrefix: []byte{0x00}, ClientTokenLength: 70 // Chrome
+	//
+	// Setting only ClientTokenPrefix installs the dummy TokenStore just as
+	// ClientTokenLength does; an explicit TokenStore still takes priority over both.
+	// [UQUIC]
+	ClientTokenPrefix []byte
 
 	// FrameBuilder specifies how the frames should be encapsulated for each Initial
 	// packet.
@@ -108,6 +147,10 @@ func (ps *InitialPacketSpec) initialPN() protocol.PacketNumber {
 	return protocol.PacketNumber(ps.InitPacketNumber)
 }
 
+// UpdateConfig installs the spec's token source into conf, resolved by getTokenStore:
+// an explicit TokenStore wins, otherwise ClientTokenLength/ClientTokenPrefix synthesize
+// one. A spec that requests no token leaves conf.TokenStore untouched, so a caller's own
+// store survives.
 func (ps *InitialPacketSpec) UpdateConfig(conf *Config) {
 	// Only override the Config's TokenStore when the spec actually provides one
 	// (an explicit TokenStore or a ClientTokenLength). Otherwise leave any
@@ -122,22 +165,30 @@ func (ps *InitialPacketSpec) getTokenStore() TokenStore {
 		return ps.TokenStore
 	}
 
-	if ps.ClientTokenLength > 0 {
+	if n := ps.tokenLength(); n > 0 {
 		return &dummyTokenStore{
-			tokenLength: ps.ClientTokenLength,
+			tokenLength: n,
+			prefix:      ps.ClientTokenPrefix,
 		}
 	}
 
 	return nil
 }
 
+// tokenLength is the size of the synthesized token: ClientTokenLength, but never
+// short enough to truncate ClientTokenPrefix.
+func (ps *InitialPacketSpec) tokenLength() int {
+	return max(ps.ClientTokenLength, len(ps.ClientTokenPrefix))
+}
+
 type dummyTokenStore struct {
 	tokenLength int
+	prefix      []byte // fixed leading bytes; the remainder is random
 }
 
 func (d *dummyTokenStore) Pop(key string) (token *ClientToken) {
 	var data []byte = make([]byte, d.tokenLength)
-	rand.Read(data)
+	rand.Read(data[copy(data, d.prefix):])
 
 	return &ClientToken{
 		data: data,

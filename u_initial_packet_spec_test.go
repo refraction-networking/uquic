@@ -1,6 +1,9 @@
 package quic
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 // stubTokenStore is a user-supplied TokenStore used to verify UpdateConfig does
 // not clobber a caller's store when the spec specifies no token settings.
@@ -26,6 +29,70 @@ func TestUpdateConfigClientTokenLength(t *testing.T) {
 	}
 	if len(tok.data) != 70 {
 		t.Fatalf("token length = %d, want 70", len(tok.data))
+	}
+}
+
+// TestUpdateConfigClientTokenPrefix verifies that ClientTokenPrefix pins the leading
+// token bytes (Chrome's tokens always start 0x00) while the remainder stays random per
+// connection, and that the token is still ClientTokenLength bytes long.
+func TestUpdateConfigClientTokenPrefix(t *testing.T) {
+	spec := &QUICSpec{InitialPacketSpec: InitialPacketSpec{
+		ClientTokenPrefix: []byte{0x00},
+		ClientTokenLength: 70,
+	}}
+	conf := &Config{}
+	spec.UpdateConfig(conf)
+
+	first := conf.TokenStore.Pop("any-key")
+	if first == nil {
+		t.Fatal("expected a token from the spec-derived TokenStore")
+	}
+	if len(first.data) != 70 {
+		t.Fatalf("token length = %d, want 70", len(first.data))
+	}
+	if first.data[0] != 0x00 {
+		t.Fatalf("token[0] = %#x, want 0x00", first.data[0])
+	}
+
+	// Each connection must get a fresh token: a constant token is its own tell.
+	second := conf.TokenStore.Pop("any-key")
+	if second.data[0] != 0x00 {
+		t.Fatalf("second token[0] = %#x, want 0x00", second.data[0])
+	}
+	if bytes.Equal(first.data[1:], second.data[1:]) {
+		t.Fatal("token remainder is not regenerated per Pop")
+	}
+}
+
+// TestUpdateConfigClientTokenPrefixOnly verifies that a prefix alone (no
+// ClientTokenLength) installs the store and sends those exact bytes verbatim.
+func TestUpdateConfigClientTokenPrefixOnly(t *testing.T) {
+	want := []byte{0x00, 0xc3, 0xec, 0x05}
+	spec := &QUICSpec{InitialPacketSpec: InitialPacketSpec{ClientTokenPrefix: want}}
+	conf := &Config{}
+	spec.UpdateConfig(conf)
+
+	if conf.TokenStore == nil {
+		t.Fatal("expected TokenStore to be set for a non-empty ClientTokenPrefix")
+	}
+	tok := conf.TokenStore.Pop("any-key")
+	if tok == nil {
+		t.Fatal("expected a token from the spec-derived TokenStore")
+	}
+	if !bytes.Equal(tok.data, want) {
+		t.Fatalf("token = %#x, want %#x", tok.data, want)
+	}
+}
+
+// TestNewClientToken verifies a TokenStore outside this package can build a token
+// with chosen bytes, and that it does not alias the caller's buffer.
+func TestNewClientToken(t *testing.T) {
+	buf := []byte{0x00, 0x01, 0x02}
+	tok := NewClientToken(buf)
+	buf[0] = 0xff
+
+	if !bytes.Equal(tok.data, []byte{0x00, 0x01, 0x02}) {
+		t.Fatalf("token data = %#x, want 000102 (caller's buffer must not alias)", tok.data)
 	}
 }
 

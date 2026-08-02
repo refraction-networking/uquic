@@ -11,6 +11,19 @@ import (
 	tls "github.com/refraction-networking/utls"
 )
 
+// UTransport is a Transport that emits the Initial flight described by QUICSpec instead
+// of quic-go's default one. Dial and DialEarly behave as Transport's do, but the
+// connection they create packs its Initial packets through uPacketPacker under the
+// spec's control.
+//
+// A nil QUICSpec makes UTransport behave like a plain Transport.
+//
+// Spec fields take effect only where dial reads them, and the read points differ:
+// SrcConnIDLength must be applied before Transport.init caches the connection ID
+// generator, the TokenStore reaches the connection through Config (QUICSpec.UpdateConfig),
+// and InitPacketNumber is passed into doDial as the Initial packet number space's seed.
+// A new InitialPacketSpec field is not live until dial is taught to read it — declaring
+// the field alone leaves it silently ignored on the wire.
 type UTransport struct {
 	*Transport
 
