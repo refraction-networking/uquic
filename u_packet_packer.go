@@ -2,10 +2,12 @@ package quic
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math"
 
 	"github.com/refraction-networking/clienthellod"
+	"github.com/refraction-networking/uquic/internal/ackhandler"
 	"github.com/refraction-networking/uquic/internal/handshake"
 	"github.com/refraction-networking/uquic/internal/monotime"
 	"github.com/refraction-networking/uquic/internal/protocol"
@@ -25,6 +27,15 @@ type uPacketPacker struct {
 	// built via MarshalInitialPacketPayload. Used by QUICFrameBuilderEx to select
 	// per-datagram configuration (e.g., different PING/CRYPTO counts per datagram).
 	initialDatagramIdx int // [UQUIC]
+
+	// flightPayloads holds the frame payloads a QUICFlightFrameBuilder planned for the
+	// Initial datagrams that have not been serialized yet, in flight order. Non-nil only
+	// between planInitialFlight and the last datagram of the flight. [UQUIC]
+	flightPayloads [][]byte
+
+	// flightPlanned records that BuildFlight has already run, so a flight is planned
+	// exactly once per connection — including after flightPayloads has drained. [UQUIC]
+	flightPlanned bool
 }
 
 func newUPacketPacker(
@@ -53,6 +64,19 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 		return nil, err
 	}
 	var size protocol.ByteCount
+	if initialSealer != nil && !onlyAck {
+		// [UQUIC] A QUICFlightFrameBuilder lays out every Initial datagram of the flight
+		// in one shot, from the complete CRYPTO stream, before the first one is
+		// serialized — the only way a datagram can carry bytes from later in the
+		// ClientHello than its own slice. When one is in force it owns the whole Initial
+		// flight, so those datagrams bypass the per-datagram pop-and-reframe path below.
+		if err := p.planInitialFlight(initialSealer, maxSize, v); err != nil {
+			return nil, err
+		}
+		if len(p.flightPayloads) > 0 {
+			return p.packPlannedInitial(initialSealer, v)
+		}
+	}
 	if initialSealer != nil {
 		initialMaxSize := maxSize - protocol.ByteCount(initialSealer.Overhead())
 		// [UQUIC] Cap the CRYPTO popped for this Initial datagram so the spec can pin the
@@ -208,7 +232,14 @@ func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.E
 	if err != nil {
 		return nil, err
 	}
+	return p.appendInitialPacketPayload(buffer, header, pl, uPayload, idx, encLevel, sealer, v)
+}
 
+// appendInitialPacketPayload serializes an Initial packet whose frame payload is already
+// marshaled: exact-size PADDING, header, AEAD and datagram padding. It is the half of
+// appendInitialPacket that a pre-planned flight datagram shares, since a
+// QUICFlightFrameBuilder produces uPayload itself. [UQUIC]
+func (p *uPacketPacker) appendInitialPacketPayload(buffer *packetBuffer, header *wire.ExtendedHeader, pl payload, uPayload []byte, idx int, encLevel protocol.EncryptionLevel, sealer sealer, v protocol.Version) (*longHeaderPacket, error) {
 	pnLen := protocol.ByteCount(header.PacketNumberLen)
 
 	// [UQUIC] Exact-size padding: append PADDING (0x00) bytes to the payload so the
@@ -230,7 +261,7 @@ func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.E
 	startLen := len(buffer.Data)
 	raw := buffer.Data[startLen:] // [UQUIC] the raw here is a sub-slice of buffer.Data, latter's len < size
 
-	raw, err = header.Append(raw, v)
+	raw, err := header.Append(raw, v)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +297,182 @@ func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.E
 	}, nil
 }
 
+// planInitialFlight lays out the entire Initial flight up front, when the spec's
+// FrameBuilder is a QUICFlightFrameBuilder. It runs at most once per connection and
+// consumes the whole CRYPTO stream, so afterwards the normal per-datagram path finds
+// nothing to pop and packPlannedInitial emits the planned datagrams instead. [UQUIC]
+func (p *uPacketPacker) planInitialFlight(sealer sealer, maxSize protocol.ByteCount, v protocol.Version) error {
+	if p.flightPlanned {
+		return nil
+	}
+	fb, ok := p.uSpec.InitialPacketSpec.FrameBuilder.(QUICFlightFrameBuilder)
+	if !ok {
+		return nil
+	}
+	// A flight plan addresses the whole ClientHello, so it can only be made while the
+	// CRYPTO stream is untouched and fully queued. uTLS coalesces the ClientHello into a
+	// single write event and quic-go drains the handshake events before packing the
+	// first packet, so this holds on the first call; if it somehow doesn't, wait rather
+	// than cut a flight out of a partial stream.
+	if p.initialStream.writeOffset != 0 || !p.initialStream.HasData() {
+		return nil
+	}
+	cryptoData := p.initialStream.PopAllCryptoData()
+	if len(cryptoData) == 0 {
+		return nil
+	}
+	p.flightPlanned = true
+
+	budgets := p.flightBudgets(len(cryptoData), sealer, maxSize, v)
+	payloads, err := fb.BuildFlight(cryptoData, budgets)
+	if err != nil {
+		return fmt.Errorf("uquic: BuildFlight: %w", err)
+	}
+	if err := validateInitialFlight(payloads, budgets, len(cryptoData)); err != nil {
+		return err
+	}
+	p.flightPayloads = payloads
+	return nil
+}
+
+// flightBudgets describes each Initial datagram to the flight builder. The spec's
+// InitialPackets pins the flight length when it is set; otherwise the builder is offered
+// as many full-size datagrams as the ClientHello needs. [UQUIC]
+func (p *uPacketPacker) flightBudgets(cryptoLen int, sealer sealer, maxSize protocol.ByteCount, v protocol.Version) []InitialDatagramBudget {
+	n := len(p.uSpec.InitialPacketSpec.InitialPackets)
+	if n == 0 {
+		if b := p.initialFrameBudget(maxSize, sealer, v); b > 0 {
+			n = (cryptoLen + b - 1) / b
+		}
+		n = max(n, 1)
+	}
+	budgets := make([]InitialDatagramBudget, n)
+	for i := range budgets {
+		plan := p.uSpec.InitialPacketSpec.planFor(i)
+		size := maxSize
+		if plan.PacketSize > 0 {
+			size = protocol.ByteCount(plan.PacketSize)
+		}
+		budgets[i] = InitialDatagramBudget{Plan: plan, MaxFrameBytes: p.initialFrameBudget(size, sealer, v)}
+	}
+	return budgets
+}
+
+// initialFrameBudget is how many frame payload bytes an Initial packet of exactly
+// packetSize bytes can carry: the size minus the long header — with its Length varint
+// sized the way appendInitialPacketPayload sizes it — and the AEAD tag. [UQUIC]
+func (p *uPacketPacker) initialFrameBudget(packetSize protocol.ByteCount, sealer sealer, v protocol.Version) int {
+	hdr := p.getLongHeader(protocol.EncryptionInitial, v)
+	hdr.Length = packetSize
+	budget := packetSize - hdr.GetLength(v) - protocol.ByteCount(sealer.Overhead())
+	return int(max(budget, 0))
+}
+
+// validateInitialFlight rejects a plan that cannot be sent as described: a payload too
+// large for its datagram, a payload that isn't a valid frame sequence, a CRYPTO frame
+// reaching past the end of the stream, or — the failure this whole mechanism exists to
+// make impossible — a plan that never emits some of the ClientHello. Nothing else sends
+// those bytes, so the peer would collect fragments it can never reassemble. [UQUIC]
+func validateInitialFlight(payloads [][]byte, budgets []InitialDatagramBudget, cryptoLen int) error {
+	if len(payloads) == 0 {
+		return errors.New("uquic: BuildFlight returned no Initial datagrams")
+	}
+	sent := make([]bool, cryptoLen)
+	for i, uPayload := range payloads {
+		budget := budgets[min(i, len(budgets)-1)].MaxFrameBytes
+		if budget > 0 && len(uPayload) > budget {
+			return fmt.Errorf("uquic: BuildFlight: Initial datagram %d is %d bytes of frames, %d more than fits in the packet", i, len(uPayload), len(uPayload)-budget)
+		}
+		frames, err := clienthellod.ReadAllFrames(bytes.NewReader(uPayload))
+		if err != nil {
+			return fmt.Errorf("uquic: BuildFlight: Initial datagram %d does not parse as QUIC frames: %w", i, err)
+		}
+		for _, frame := range frames {
+			cf, ok := frame.(*clienthellod.CRYPTO)
+			if !ok {
+				continue
+			}
+			if cf.Offset+cf.Length > uint64(cryptoLen) {
+				return fmt.Errorf("uquic: BuildFlight: Initial datagram %d has a CRYPTO frame covering [%d,%d) of a %d byte CRYPTO stream", i, cf.Offset, cf.Offset+cf.Length, cryptoLen)
+			}
+			for j := cf.Offset; j < cf.Offset+cf.Length; j++ {
+				sent[j] = true
+			}
+		}
+	}
+	for i, ok := range sent {
+		if !ok {
+			return fmt.Errorf("uquic: BuildFlight: no Initial datagram carries CRYPTO byte %d of %d, so the ClientHello could never be reassembled", i, cryptoLen)
+		}
+	}
+	return nil
+}
+
+// packPlannedInitial serializes the next Initial datagram of a pre-planned flight. Such
+// a datagram is never coalesced with anything else: the flight builder owns its entire
+// frame payload, and no later encryption level is available while the Initial flight is
+// still going out. [UQUIC]
+func (p *uPacketPacker) packPlannedInitial(sealer sealer, v protocol.Version) (*coalescedPacket, error) {
+	uPayload := p.flightPayloads[0]
+	p.flightPayloads = p.flightPayloads[1:]
+	idx := p.initialDatagramIdx
+	p.initialDatagramIdx++
+
+	pl, err := p.plannedInitialPayload(uPayload, v)
+	if err != nil {
+		return nil, err
+	}
+	buffer := getPacketBuffer()
+	pkt, err := p.appendInitialPacketPayload(buffer, p.getLongHeader(protocol.EncryptionInitial, v), pl, uPayload, idx, protocol.EncryptionInitial, sealer, v)
+	if err != nil {
+		buffer.Release()
+		return nil, err
+	}
+	return &coalescedPacket{buffer: buffer, longHdrPackets: []*longHeaderPacket{pkt}}, nil
+}
+
+// plannedInitialPayload reads the CRYPTO frames back out of a planned payload and
+// registers them with the Initial ack handler, so loss recovery retransmits exactly the
+// stream ranges this datagram carried rather than the contiguous slice the packer would
+// otherwise have popped for it. [UQUIC]
+func (p *uPacketPacker) plannedInitialPayload(uPayload []byte, v protocol.Version) (payload, error) {
+	frames, err := clienthellod.ReadAllFrames(bytes.NewReader(uPayload))
+	if err != nil { // already validated in planInitialFlight, so this is a uQUIC bug
+		return payload{}, fmt.Errorf("uquic: planned Initial payload does not parse as QUIC frames: %w", err)
+	}
+	handler := p.retransmissionQueue.AckHandler(protocol.EncryptionInitial)
+	pl := payload{length: protocol.ByteCount(len(uPayload))}
+	for _, frame := range frames {
+		cf, ok := frame.(*clienthellod.CRYPTO)
+		if !ok {
+			continue
+		}
+		pl.frames = append(pl.frames, ackhandler.Frame{
+			Frame:   &wire.CryptoFrame{Offset: protocol.ByteCount(cf.Offset), Data: cf.Data()},
+			Handler: handler,
+		})
+	}
+	return pl, nil
+}
+
 func (p *uPacketPacker) MarshalInitialPacketPayload(pl payload, v protocol.Version) ([]byte, error) {
+	// [UQUIC] Once a QUICFlightFrameBuilder has laid out the flight, any further Initial
+	// packet is a retransmission or a PTO probe rather than part of it. Its frames can be
+	// a non-contiguous set of stream ranges — that freedom is the point of a flight — so
+	// they neither reassemble into one slice nor mean anything to a builder that has
+	// already planned and consumed the stream. Send them exactly as the packer produced
+	// them.
+	if p.flightPlanned {
+		var frameBytes []byte
+		for _, f := range pl.frames {
+			var err error
+			if frameBytes, err = f.Frame.Append(frameBytes, v); err != nil {
+				return nil, err
+			}
+		}
+		return frameBytes, nil
+	}
+
 	var originalFrameBytes []byte
 
 	for _, f := range pl.frames {

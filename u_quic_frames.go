@@ -12,6 +12,25 @@ import (
 	"github.com/refraction-networking/uquic/quicvarint"
 )
 
+// cryptoSafeRandUint64 draws a value from [min, max) with crypto/rand.
+//
+// A degenerate range [n, n] (or an inverted one) means a fixed value, not a random
+// draw — return min directly. crypto/rand.Int panics when its argument is <= 0, so
+// this also guards against that crash. This is what lets a spec pin an exact frame
+// count, e.g. MinPING==MaxPING==0 for "no PING frames" (Min==Max passes the
+// buildInternal bounds checks, which only reject Min>Max).
+func cryptoSafeRandUint64(min, max uint64) (uint64, error) {
+	if max <= min {
+		return min, nil
+	}
+	minMaxDiff := big.NewInt(int64(max - min))
+	offset, err := rand.Int(rand.Reader, minMaxDiff)
+	if err != nil {
+		return 0, err
+	}
+	return min + offset.Uint64(), nil
+}
+
 // QUICFrameBuilder builds QUIC Initial packet frames from TLS crypto data.
 type QUICFrameBuilder interface {
 	// Build ingests data from crypto frames without the crypto frame header
@@ -28,6 +47,14 @@ type QUICFrameBuilder interface {
 // Implementations must produce CRYPTO frame wire offsets = (local_offset + baseOffset).
 // Existing single-datagram specs (Chrome 115, Firefox 116) implement QUICFrameBuilder
 // only; uPacketPacker falls back to Build() when QUICFrameBuilderEx is not implemented.
+//
+// A datagram can only re-cut the slice it is handed. Slices are popped from the CRYPTO
+// stream in order as the flight is packed, so datagram i never sees a byte belonging to
+// datagram i+1: with a ~2300-byte ClientHello and ~1150 bytes of Initial payload
+// capacity, the tail of the ClientHello does not exist yet when the first datagram is
+// built. Every byte handed to BuildForDatagram must also be emitted by it — bytes held
+// back are never sent by anyone else, and the ClientHello arrives truncated. Use
+// QUICFlightFrameBuilder for any layout that moves bytes between datagrams.
 type QUICFrameBuilderEx interface {
 	QUICFrameBuilder
 	BuildForDatagram(datagramIdx int, cryptoData []byte, baseOffset uint64) (allFrames []byte, err error)
@@ -265,23 +292,6 @@ func (qrf *QUICRandomFrames) buildInternal(cryptoData []byte, baseOffset uint64)
 
 	var frameList QUICFrames = make([]QUICFrame, 0)
 
-	var cryptoSafeRandUint64 = func(min, max uint64) (uint64, error) {
-		// A degenerate range [n, n] (or an inverted one) means a fixed value, not a
-		// random draw — return min directly. crypto/rand.Int panics when its argument
-		// is <= 0, so this also guards against that crash. This is what lets a spec
-		// pin an exact frame count, e.g. MinPING==MaxPING==0 for "no PING frames"
-		// (Min==Max passes the buildInternal bounds checks, which only reject Min>Max).
-		if max <= min {
-			return min, nil
-		}
-		minMaxDiff := big.NewInt(int64(max - min))
-		offset, err := rand.Int(rand.Reader, minMaxDiff)
-		if err != nil {
-			return 0, err
-		}
-		return min + offset.Uint64(), nil
-	}
-
 	// determine number of PING frames with crypto.rand
 	numPING, err := cryptoSafeRandUint64(uint64(qrf.MinPING), uint64(qrf.MaxPING))
 	if err != nil {
@@ -363,9 +373,9 @@ func (qrf *QUICRandomFrames) buildInternal(cryptoData []byte, baseOffset uint64)
 // It enables different PING/CRYPTO/PADDING distributions for each Initial datagram,
 // which is useful for clients like Chrome 146 that send multiple Initial packets.
 //
-// TODO: Future work — pre-plan the full ClientHello fragmentation across N datagrams
-// before any datagram is sent (requires access to the full crypto stream upfront),
-// enabling exact replication of Chrome's cross-packet CRYPTO scatter pattern.
+// Each datagram still re-cuts only its own slice of the stream. To choose which part of
+// the ClientHello a datagram carries — Chrome's cross-packet CRYPTO scatter, where the
+// first datagram holds the tail — use a QUICFlightFrameBuilder instead.
 type QUICMultiDatagramFrames struct {
 	// PerDatagram specifies the frame randomization for each Initial datagram.
 	// PerDatagram[0] is used for the first datagram, [1] for the second, etc.

@@ -151,6 +151,30 @@ func (s *initialCryptoStream) DisableScrambling() {
 	s.scramble = false
 }
 
+// PopAllCryptoData removes and returns the entire queued CRYPTO stream — for a client,
+// the complete ClientHello — advancing the write offset past all of it, so HasData
+// reports false afterwards and no CRYPTO frame is ever popped for it.
+//
+// [UQUIC] This is what lets a QUICFlightFrameBuilder see the whole ClientHello before
+// the first Initial packet is serialized. PopCryptoFrame only ever yields the next
+// contiguous slice that fits one packet, which is why a per-datagram builder cannot put
+// the tail of the ClientHello in the first datagram the way Chrome does. The caller
+// takes over responsibility for emitting every byte returned here.
+//
+// It returns nil while anti-DPI ClientHello scrambling is still on: scrambling owns the
+// cut points and defers parts of the stream, which is incompatible with handing the
+// stream to a spec. uQUIC disables it (see DisableScrambling) whenever a QUICSpec is in
+// force, so a flight builder always gets the data.
+func (s *initialCryptoStream) PopAllCryptoData() []byte {
+	if s.scramble {
+		return nil
+	}
+	data := s.writeBuf
+	s.writeBuf = nil
+	s.writeOffset += protocol.ByteCount(len(data))
+	return data
+}
+
 func (s *initialCryptoStream) Write(p []byte) (int, error) {
 	s.writeBuf = append(s.writeBuf, p...)
 	if !s.scramble {
