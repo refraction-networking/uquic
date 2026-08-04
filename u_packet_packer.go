@@ -259,6 +259,15 @@ func (p *uPacketPacker) appendInitialPacketPayload(buffer *packetBuffer, header 
 	header.Length = pnLen + protocol.ByteCount(sealer.Overhead()) + protocol.ByteCount(len(uPayload))
 
 	startLen := len(buffer.Data)
+	// [UQUIC] How many bytes land here is decided by the frame builder and the spec's
+	// PacketSize, not by quic-go's payload sizing, so nothing upstream has bounded them
+	// against the packet buffer. Writing past it does not just overflow: append() would
+	// quietly move raw off buffer.Data's array — losing the packet — and then the reslice
+	// below would panic. Refuse the packet with a diagnosable error instead.
+	packetLen := int(header.GetLength(v)) + len(uPayload) + sealer.Overhead()
+	if avail := cap(buffer.Data) - startLen; packetLen > avail {
+		return nil, fmt.Errorf("uquic: Initial packet %d does not fit the packet buffer: %d bytes of frames make a %d-byte packet, %d more than the %d bytes available", idx, len(uPayload), packetLen, packetLen-avail, avail)
+	}
 	raw := buffer.Data[startLen:] // [UQUIC] the raw here is a sub-slice of buffer.Data, latter's len < size
 
 	raw, err := header.Append(raw, v)

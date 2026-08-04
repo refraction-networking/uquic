@@ -78,6 +78,86 @@ func TestQUICRandomFrames(t *testing.T) {
 	}
 }
 
+// TestQUICRandomFramesMorePADDINGFramesThanBytes pins the case where the spec asks for
+// more PADDING frames than there are PADDING bytes to hand out. Every PADDING frame needs
+// at least one byte, so the frame count must be clamped to the byte budget; without the
+// clamp the per-frame budget underflows (unsigned) and the payload blows past Length.
+func TestQUICRandomFramesMorePADDINGFramesThanBytes(t *testing.T) {
+	// Pin PING/CRYPTO to one frame each (min == max is not random) and measure the
+	// CRYPTO+PING size with padding disabled, so we can ask for a known few bytes of it.
+	base := QUICRandomFrames{
+		MinPING:   1,
+		MaxPING:   1,
+		MinCRYPTO: 1,
+		MaxCRYPTO: 1,
+		Length:    0, // already exceeded by CRYPTO+PING, so no PADDING is appended
+	}
+	basePayload, err := base.Build(testCryptoFrameBytes)
+	if err != nil {
+		t.Fatalf("Failed to build baseline QUIC frames: %v", err)
+	}
+
+	for extra := 1; extra <= 8; extra++ {
+		qrf := base
+		qrf.MinPADDING = 6 // more PADDING frames than the extra bytes available
+		qrf.MaxPADDING = 6
+		qrf.Length = uint16(len(basePayload) + extra)
+
+		resultQUICPayload, err := qrf.Build(testCryptoFrameBytes)
+		if err != nil {
+			t.Fatalf("Failed to build QUIC frames with %d PADDING bytes: %v", extra, err)
+		}
+
+		if len(resultQUICPayload) != int(qrf.Length) {
+			t.Fatalf("QUIC payload length mismatch with %d PADDING bytes: got %d, want %d",
+				extra, len(resultQUICPayload), qrf.Length)
+		}
+	}
+}
+
+// TestQUICRandomFramesMoreCRYPTOFramesThanBytes is the CRYPTO analogue of the PADDING
+// case above: a spec that asks to split the crypto data into more CRYPTO frames than it
+// has bytes. Each frame carries at least one byte, so the count must be clamped to the
+// data available; without the clamp the per-frame budget underflows.
+func TestQUICRandomFramesMoreCRYPTOFramesThanBytes(t *testing.T) {
+	shortCryptoData := []byte{0xde, 0xad, 0xbe}
+
+	qrf := QUICRandomFrames{
+		MinPING:   0, // min == max is not random, so this pins "no PING frames"
+		MaxPING:   0,
+		MinCRYPTO: 6, // more CRYPTO frames than the 3 bytes there are to split
+		MaxCRYPTO: 6,
+	}
+	resultQUICPayload, err := qrf.Build(shortCryptoData)
+	if err != nil {
+		t.Fatalf("Failed to build QUIC frames: %v", err)
+	}
+
+	qchframes, err := clienthellod.ReadAllFrames(bytes.NewReader(resultQUICPayload))
+	if err != nil {
+		t.Fatalf("Failed to read QUIC frames: %v", err)
+	}
+
+	reassembledCryptoData, err := clienthellod.ReassembleCRYPTOFrames(qchframes)
+	if err != nil {
+		t.Fatalf("Failed to reassemble crypto data: %v", err)
+	}
+	if !bytes.Equal(reassembledCryptoData, shortCryptoData) {
+		t.Fatalf("Reassembled crypto data mismatch: got %x, want %x", reassembledCryptoData, shortCryptoData)
+	}
+
+	var cryptoCount int
+	for _, frame := range qchframes {
+		if frame.FrameType() == clienthellod.QUICFrame_CRYPTO {
+			cryptoCount++
+		}
+	}
+	if cryptoCount < 1 || cryptoCount > len(shortCryptoData) {
+		t.Fatalf("CRYPTO frame count mismatch: got %d for %d bytes, want 1-%d",
+			cryptoCount, len(shortCryptoData), len(shortCryptoData))
+	}
+}
+
 var (
 	testCryptoFrameBytes = []byte{
 		0x00, 0x01, 0x02, 0x03,

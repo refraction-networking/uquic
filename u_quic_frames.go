@@ -311,7 +311,10 @@ func (qrf *QUICRandomFrames) buildInternal(cryptoData []byte, baseOffset uint64)
 
 	lenCryptoData := uint64(len(cryptoData))
 	offsetCryptoData := uint64(0)
-	for i := uint64(0); i < numCRYPTO-1; i++ { // select n-1 times, since the last one must be the remaining
+	// Every CRYPTO frame needs at least one byte, so more frames than bytes is not a
+	// layout — clamp instead of underflowing the per-frame budget below.
+	numCRYPTO = min(max(numCRYPTO, 1), lenCryptoData)
+	for i := uint64(0); i+1 < numCRYPTO; i++ { // select n-1 times, since the last one must be the remaining
 		// randomly select length of CRYPTO frame.
 		// Length must be at least 1 byte and at most the remaining length of cryptoData minus the remaining number of CRYPTO frames.
 		// i.e. len in [1, len(cryptoData)-offsetCryptoData-(numCRYPTO-i-2))
@@ -343,6 +346,9 @@ func (qrf *QUICRandomFrames) buildInternal(cryptoData []byte, baseOffset uint64)
 		if err != nil {
 			return nil, err
 		}
+		// Every PADDING frame needs at least one byte, so more frames than bytes is not
+		// a layout — clamp instead of underflowing the per-frame budget below.
+		numPADDING = min(max(numPADDING, 1), lenPADDING)
 
 		for i := uint64(0); i < numPADDING-1; i++ { // select n-1 times, since the last one must be the remaining
 			// randomly select length of PADDING frame.
