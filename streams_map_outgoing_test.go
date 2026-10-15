@@ -468,14 +468,14 @@ func TestStreamsMapOutgoingRandomizedWithCancellation(t *testing.T) {
 			t.Fatal("timed out waiting for STREAMS_BLOCKED frame")
 		}
 
-		synctest.Wait()
 		cancel()
+		// Drain cancellations before granting stream credit.
+		synctest.Wait()
 
 		limit := firstStream - 4
 		maxStream := firstStream + 4*(n-1)
 		var limits []protocol.StreamID
 		seen := make(map[protocol.StreamID]struct{})
-		var lastStreamSeen protocol.StreamID
 		var numCancelledSeen int
 		for limit < maxStream {
 			add := 4 * protocol.StreamID(rand.IntN(n/5)+1)
@@ -486,7 +486,8 @@ func TestStreamsMapOutgoingRandomizedWithCancellation(t *testing.T) {
 			t.Logf("setting stream limit to %d", limit)
 			m.SetMaxStream(limit)
 
-			for lastStreamSeen < min(maxStream, limit) {
+			// Results can arrive out of stream-ID order; wait for every granted stream.
+			for len(seen) < int(min(maxStream, limit).StreamNum()) {
 				select {
 				case res := <-resultChan:
 					if errors.Is(res.err, context.Canceled) {
@@ -495,7 +496,7 @@ func TestStreamsMapOutgoingRandomizedWithCancellation(t *testing.T) {
 						require.NoError(t, res.err)
 						require.NotContains(t, seen, res.str.id)
 						seen[res.str.id] = struct{}{}
-						lastStreamSeen = res.str.id
+						require.LessOrEqual(t, res.str.id, limit)
 					}
 				case <-time.After(time.Second):
 					t.Fatalf("timed out waiting for stream to open")
