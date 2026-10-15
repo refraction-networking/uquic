@@ -264,7 +264,12 @@ func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
 			},
 		})
 	}
-	return c.conn.SendDatagram(data)
+	err := c.conn.SendDatagram(data)
+	var tooLarge *quic.DatagramTooLargeError
+	if errors.As(err, &tooLarge) {
+		return &quic.DatagramTooLargeError{MaxDatagramPayloadSize: max(0, tooLarge.MaxDatagramPayloadSize-int64(quicvarint.Len(quarterStreamID)))}
+	}
+	return err
 }
 
 func (c *rawConn) receiveDatagrams() error {

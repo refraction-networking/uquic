@@ -500,3 +500,16 @@ func testConnDatagramFailures(t *testing.T, datagram []byte) {
 		t.Fatal("timeout waiting for close")
 	}
 }
+
+func TestConnDatagramTooLargePayloadLimit(t *testing.T) {
+	client, _ := newConnPair(t, withDatagrams())
+	conn := newRawConn(client, false, nil, nil, nil, nil)
+	payload := make([]byte, 65536)
+	var quicLimit *quic.DatagramTooLargeError
+	require.ErrorAs(t, client.SendDatagram(payload), &quicLimit)
+	for _, streamID := range []quic.StreamID{0, 256, 65536, 1 << 32} {
+		var httpLimit *quic.DatagramTooLargeError
+		require.ErrorAs(t, conn.sendDatagram(streamID, payload), &httpLimit)
+		require.Equal(t, quicLimit.MaxDatagramPayloadSize-int64(quicvarint.Len(uint64(streamID/4))), httpLimit.MaxDatagramPayloadSize)
+	}
+}
