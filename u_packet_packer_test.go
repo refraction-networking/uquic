@@ -4,8 +4,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/refraction-networking/uquic/internal/monotime"
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/wire"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 )
 
 // uTestSealer is a no-op sealer: these tests only exercise packet sizing, so all that
@@ -108,4 +111,27 @@ func TestAppendInitialPacketPayloadExactFit(t *testing.T) {
 	if len(buffer.Data) != protocol.MaxPacketBufferSize {
 		t.Fatalf("Buffer length mismatch: got %d, want %d", len(buffer.Data), protocol.MaxPacketBufferSize)
 	}
+}
+
+func TestUPackerEmpty1RTTProbe(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	tp := newTestPacketPacker(t, ctrl, protocol.PerspectiveClient)
+	p := newUPacketPacker(tp.packer, &QUICSpec{})
+	tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealer(ctrl), nil).Times(2)
+	tp.framer.EXPECT().HasData().Times(2)
+	tp.pnManager.EXPECT().PeekPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42), protocol.PacketNumberLen2).MaxTimes(2)
+	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true).Times(2)
+
+	packet, err := p.PackPTOProbePacket(protocol.Encryption1RTT, 1200, false, monotime.Now(), protocol.Version1)
+	require.NoError(t, err)
+	require.Nil(t, packet)
+
+	tp.pnManager.EXPECT().PopPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42))
+	packet, err = p.PackPTOProbePacket(protocol.Encryption1RTT, 1200, true, monotime.Now(), protocol.Version1)
+	require.NoError(t, err)
+	require.NotNil(t, packet)
+	defer packet.buffer.Release()
+	require.NotNil(t, packet.shortHdrPacket)
+	require.Len(t, packet.shortHdrPacket.Frames, 1)
+	require.Equal(t, &wire.PingFrame{}, packet.shortHdrPacket.Frames[0].Frame)
 }

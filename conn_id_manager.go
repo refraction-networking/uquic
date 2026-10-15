@@ -17,7 +17,8 @@ type newConnID struct {
 }
 
 type connIDManager struct {
-	queue []newConnID
+	queue             []newConnID
+	connectionIDLimit uint64
 
 	highestProbingID uint64
 	pathProbing      map[pathID]newConnID // initialized lazily
@@ -54,6 +55,7 @@ func newConnIDManager(
 		removeStatelessResetToken: removeStatelessResetToken,
 		queueControlFrame:         queueControlFrame,
 		queue:                     make([]newConnID, 0, protocol.MaxActiveConnectionIDs),
+		connectionIDLimit:         protocol.MaxActiveConnectionIDs,
 	}
 }
 
@@ -65,7 +67,7 @@ func (h *connIDManager) Add(f *wire.NewConnectionIDFrame) error {
 	if err := h.add(f); err != nil {
 		return err
 	}
-	if len(h.queue) >= protocol.MaxActiveConnectionIDs {
+	if uint64(len(h.queue)) >= h.connectionIDLimit {
 		return &qerr.TransportError{ErrorCode: qerr.ConnectionIDLimitError}
 	}
 	return nil
@@ -231,7 +233,7 @@ func (h *connIDManager) shouldUpdateConnID() bool {
 	// For later changes, only change if
 	// 1. The queue of connection IDs is filled more than 50%.
 	// 2. We sent at least PacketsPerConnectionID packets
-	return 2*len(h.queue) >= protocol.MaxActiveConnectionIDs &&
+	return 2*uint64(len(h.queue)) >= h.connectionIDLimit &&
 		h.packetsSinceLastChange >= h.packetsPerConnectionID
 }
 

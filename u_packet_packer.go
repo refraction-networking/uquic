@@ -556,26 +556,8 @@ func (p *uPacketPacker) PackPTOProbePacket(
 	v protocol.Version,
 ) (*coalescedPacket, error) {
 	if encLevel == protocol.Encryption1RTT {
-		s, err := p.cryptoSetup.Get1RTTSealer()
-		if err != nil {
-			return nil, err
-		}
-		kp := s.KeyPhase()
-		connID := p.getDestConnID()
-		pn, pnLen := p.pnManager.PeekPacketNumber(protocol.Encryption1RTT)
-		hdrLen := wire.ShortHeaderLen(connID, pnLen)
-		pl := p.maybeGetAppDataPacket(maxPacketSize-protocol.ByteCount(s.Overhead())-hdrLen, false, true, now, v)
-		if pl.length == 0 {
-			return nil, nil
-		}
-		buffer := getPacketBuffer()
-		packet := &coalescedPacket{buffer: buffer}
-		shp, err := p.appendShortHeaderPacket(buffer, connID, pn, pnLen, kp, pl, 0, maxPacketSize, s, false, v)
-		if err != nil {
-			return nil, err
-		}
-		packet.shortHdrPacket = &shp
-		return packet, nil
+		// Fingerprint customization applies to Initial packets; preserve the base PTO PING fallback.
+		return p.packetPacker.packPTOProbePacket1RTT(maxPacketSize, addPingIfEmpty, now, v)
 	}
 
 	var sealer handshake.LongHeaderSealer
