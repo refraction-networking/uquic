@@ -1,7 +1,6 @@
 package quic
 
 import (
-	"bytes"
 	"crypto/rand"
 	"fmt"
 	"strings"
@@ -82,7 +81,7 @@ func parseInitialDatagram(t *testing.T, data []byte) sentDatagram {
 	// The mock sealer appends its overhead to the payload instead of encrypting it.
 	payload := data[hdrLen : packetLen-7]
 
-	frames, err := clienthellod.ReadAllFrames(bytes.NewReader(payload))
+	frames, err := readQUICFrames(payload)
 	require.NoError(t, err)
 	dg := sentDatagram{packetSize: int(packetLen)}
 	for _, f := range frames {

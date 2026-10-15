@@ -122,9 +122,7 @@ func (qfs QUICFrames) build(cryptoData []byte, baseOffset uint64) (payload []byt
 // BuildFromFrames ingests data from all input frames and returns the byte representation
 // of all frames as specified in the slice.
 func (qfs QUICFrames) BuildFromFrames(frames []byte) (payload []byte, err error) {
-	// parse frames
-	r := bytes.NewReader(frames)
-	qchframes, err := clienthellod.ReadAllFrames(r)
+	qchframes, err := readQUICFrames(frames)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +135,12 @@ func (qfs QUICFrames) BuildFromFrames(frames []byte) (payload []byte, err error)
 
 	// marshal
 	return qfs.Build(cryptoData)
+}
+
+func readQUICFrames(payload []byte) ([]clienthellod.QUICFrame, error) {
+	// clienthellod rewinds the first non-PADDING byte and may read an empty slice.
+	// bytes.Buffer returns nil for that read at EOF, preserving a trailing PING.
+	return clienthellod.ReadAllFrames(bytes.NewBuffer(payload))
 }
 
 // QUICFrame is the interface for all QUIC frames to be included in the Initial Packet.

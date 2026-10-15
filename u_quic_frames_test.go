@@ -18,8 +18,7 @@ func TestQUICFrames(t *testing.T) {
 	}
 
 	// verify that the crypto frames would actually assemble the original crypto data
-	r := bytes.NewReader(resultQUICPayload)
-	qchframes, err := clienthellod.ReadAllFrames(r)
+	qchframes, err := readQUICFrames(resultQUICPayload)
 	if err != nil {
 		t.Fatalf("Failed to read QUIC frames: %v", err)
 	}
@@ -44,8 +43,7 @@ func TestQUICRandomFrames(t *testing.T) {
 	}
 
 	// verify that the crypto frames would actually assemble the original crypto data
-	r := bytes.NewReader(resultQUICPayload)
-	qchframes, err := clienthellod.ReadAllFrames(r)
+	qchframes, err := readQUICFrames(resultQUICPayload)
 	if err != nil {
 		t.Fatalf("Failed to read QUIC frames: %v", err)
 	}
@@ -75,6 +73,29 @@ func TestQUICRandomFrames(t *testing.T) {
 
 	if cryptoCount < 2 || cryptoCount > 8 {
 		t.Fatalf("CRYPTO frame count mismatch: got %d, want 2-8", cryptoCount)
+	}
+}
+
+// A PING following PADDING at EOF must not disappear from frame counts.
+func TestQUICFramesTrailingPING(t *testing.T) {
+	payload, err := (QUICFrames{
+		QUICFramePing{}, QUICFrameCrypto{}, QUICFramePadding{Length: 1}, QUICFramePing{},
+	}).Build(testCryptoFrameBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames, err := readQUICFrames(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pingCount := 0
+	for _, frame := range frames {
+		if frame.FrameType() == clienthellod.QUICFrame_PING {
+			pingCount++
+		}
+	}
+	if pingCount != 2 {
+		t.Fatalf("PING frame count mismatch: got %d, want 2", pingCount)
 	}
 }
 
@@ -133,7 +154,7 @@ func TestQUICRandomFramesMoreCRYPTOFramesThanBytes(t *testing.T) {
 		t.Fatalf("Failed to build QUIC frames: %v", err)
 	}
 
-	qchframes, err := clienthellod.ReadAllFrames(bytes.NewReader(resultQUICPayload))
+	qchframes, err := readQUICFrames(resultQUICPayload)
 	if err != nil {
 		t.Fatalf("Failed to read QUIC frames: %v", err)
 	}
