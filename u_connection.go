@@ -87,7 +87,7 @@ var newUClientConnection = func(
 		s.qlogger,
 		s.logger,
 	)
-	s.currentMTUEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
+	s.currentPacketMTU.Store(uint32(s.config.InitialPacketSize))
 	// [UQUIC] Set Initial packet number encoding length.
 	// Per-packet list takes precedence over single-value override.
 	if len(uSpec.InitialPacketSpec.InitPacketNumberLengths) > 0 {

@@ -3,6 +3,7 @@ package quic
 import (
 	"fmt"
 	"slices"
+	"sync/atomic"
 
 	"github.com/refraction-networking/uquic/internal/protocol"
 	"github.com/refraction-networking/uquic/internal/qerr"
@@ -17,7 +18,9 @@ type newConnID struct {
 }
 
 type connIDManager struct {
-	queue []newConnID
+	// Written by the connection loop and read concurrently by datagram senders.
+	maxConnIDLen atomic.Int32
+	queue        []newConnID
 
 	highestProbingID uint64
 	pathProbing      map[pathID]newConnID // initialized lazily
@@ -48,13 +51,15 @@ func newConnIDManager(
 	removeStatelessResetToken func(protocol.StatelessResetToken),
 	queueControlFrame func(wire.Frame),
 ) *connIDManager {
-	return &connIDManager{
+	manager := &connIDManager{
 		activeConnectionID:        initialDestConnID,
 		addStatelessResetToken:    addStatelessResetToken,
 		removeStatelessResetToken: removeStatelessResetToken,
 		queueControlFrame:         queueControlFrame,
 		queue:                     make([]newConnID, 0, protocol.MaxActiveConnectionIDs),
 	}
+	manager.maxConnIDLen.Store(int32(initialDestConnID.Len()))
+	return manager
 }
 
 func (h *connIDManager) AddFromPreferredAddress(connID protocol.ConnectionID, resetToken protocol.StatelessResetToken) error {
@@ -130,6 +135,7 @@ func (h *connIDManager) add(f *wire.NewConnectionIDFrame) error {
 }
 
 func (h *connIDManager) addConnectionID(seq uint64, connID protocol.ConnectionID, resetToken protocol.StatelessResetToken) error {
+	h.maxConnIDLen.Store(max(h.maxConnIDLen.Load(), int32(connID.Len())))
 	// fast path: add to the end of the queue
 	if len(h.queue) == 0 || h.queue[len(h.queue)-1].SequenceNumber < seq {
 		h.queue = append(h.queue, newConnID{
@@ -203,6 +209,7 @@ func (h *connIDManager) ChangeInitialConnID(newConnID protocol.ConnectionID) {
 	if h.activeSequenceNumber != 0 {
 		panic("expected first connection ID to have sequence number 0")
 	}
+	h.maxConnIDLen.Store(max(h.maxConnIDLen.Load(), int32(newConnID.Len())))
 	h.activeConnectionID = newConnID
 }
 

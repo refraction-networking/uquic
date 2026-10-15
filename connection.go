@@ -166,7 +166,7 @@ type Conn struct {
 	packer        packer
 	mtuDiscoverer mtuDiscoverer // initialized when the transport parameters are received
 
-	currentMTUEstimate atomic.Uint32
+	currentPacketMTU atomic.Uint32
 
 	initialStream       *initialCryptoStream
 	handshakeStream     *cryptoStream
@@ -323,7 +323,7 @@ var newConnection = func(
 		s.qlogger,
 		s.logger,
 	)
-	s.currentMTUEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
+	s.currentPacketMTU.Store(uint32(s.config.InitialPacketSize))
 	statelessResetToken := statelessResetter.GetStatelessResetToken(srcConnID)
 	params := &wire.TransportParameters{
 		InitialMaxStreamDataBidiLocal:   protocol.ByteCount(s.config.InitialStreamReceiveWindow),
@@ -452,7 +452,7 @@ var newClientConnection = func(
 		s.qlogger,
 		s.logger,
 	)
-	s.currentMTUEstimate.Store(uint32(estimateMaxPayloadSize(protocol.ByteCount(s.config.InitialPacketSize))))
+	s.currentPacketMTU.Store(uint32(s.config.InitialPacketSize))
 	oneRTTStream := newCryptoStream()
 	params := &wire.TransportParameters{
 		InitialMaxStreamDataBidiRemote: protocol.ByteCount(s.config.InitialStreamReceiveWindow),
@@ -915,6 +915,7 @@ func (c *Conn) idleTimeoutStartTime() monotime.Time {
 func (c *Conn) switchToNewPath(tr *Transport, now monotime.Time) {
 	initialPacketSize := protocol.ByteCount(c.config.InitialPacketSize)
 	c.sentPacketHandler.MigratedPath(now, initialPacketSize)
+	c.currentPacketMTU.Store(uint32(initialPacketSize))
 	maxPacketSize := protocol.ByteCount(protocol.MaxPacketBufferSize)
 	if c.peerParams.MaxUDPPayloadSize > 0 && c.peerParams.MaxUDPPayloadSize < maxPacketSize {
 		maxPacketSize = c.peerParams.MaxUDPPayloadSize
@@ -1293,6 +1294,7 @@ func (c *Conn) handleShortHeaderPacket(
 	}
 	c.pathManager.SwitchToPath(p.remoteAddr)
 	c.sentPacketHandler.MigratedPath(p.rcvTime, protocol.ByteCount(c.config.InitialPacketSize))
+	c.currentPacketMTU.Store(uint32(c.config.InitialPacketSize))
 	maxPacketSize := protocol.ByteCount(protocol.MaxPacketBufferSize)
 	if c.peerParams.MaxUDPPayloadSize > 0 && c.peerParams.MaxUDPPayloadSize < maxPacketSize {
 		maxPacketSize = c.peerParams.MaxUDPPayloadSize
@@ -2129,8 +2131,8 @@ func (c *Conn) handleAckFrame(frame *wire.AckFrame, encLevel protocol.Encryption
 	}
 	// If one of the acknowledged packets was a Path MTU probe packet, this might have increased the Path MTU estimate.
 	if c.mtuDiscoverer != nil {
-		if mtu := c.mtuDiscoverer.CurrentSize(); mtu > protocol.ByteCount(c.currentMTUEstimate.Load()) {
-			c.currentMTUEstimate.Store(uint32(mtu))
+		if mtu := c.mtuDiscoverer.CurrentSize(); mtu > protocol.ByteCount(c.currentPacketMTU.Load()) {
+			c.currentPacketMTU.Store(uint32(mtu))
 			c.sentPacketHandler.SetMaxDatagramSize(mtu)
 		}
 	}
@@ -3026,20 +3028,25 @@ func (c *Conn) SendDatagram(p []byte) error {
 	if !c.supportsDatagrams() {
 		return errors.New("datagram support disabled")
 	}
-
-	f := &wire.DatagramFrame{DataLenPresent: true}
-	// The payload size estimate is conservative.
-	// Under many circumstances we could send a few more bytes.
-	maxDataLen := min(
-		f.MaxDataLen(c.peerParams.MaxDatagramFrameSize, c.version),
-		protocol.ByteCount(c.currentMTUEstimate.Load()),
-	)
-	if protocol.ByteCount(len(p)) > maxDataLen {
-		return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}
+	maxDataLen := c.DatagramPayloadLimit()
+	if int64(len(p)) > maxDataLen {
+		return &DatagramTooLargeError{MaxDatagramPayloadSize: maxDataLen}
 	}
-	f.Data = make([]byte, len(p))
+	f := &wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, len(p))}
 	copy(f.Data, p)
 	return c.datagramQueue.Add(f)
+}
+
+// DatagramPayloadLimit returns the conservative payload limit currently used by
+// SendDatagram. Call only after the handshake completes. The limit is zero if the
+// peer did not negotiate datagrams. It can change with MTU discovery, connection
+// IDs and path migration; reading it does not reserve space in the send queue.
+func (c *Conn) DatagramPayloadLimit() int64 {
+	f := &wire.DatagramFrame{DataLenPresent: true}
+	// Reserve short-header flags, every known peer CID, the largest packet
+	// number, AEAD tag and DATAGRAM framing. MTU stores packet bytes throughout.
+	packetPayload := protocol.ByteCount(c.currentPacketMTU.Load()) - protocol.ByteCount(1+c.connIDManager.maxConnIDLen.Load()+4+16+3)
+	return int64(max(0, min(f.MaxDataLen(c.peerParams.MaxDatagramFrameSize, c.version), packetPayload)))
 }
 
 // ReceiveDatagram gets a message received in a QUIC datagram, as specified in RFC 9221.
@@ -3138,11 +3145,4 @@ func (c *Conn) NextConnection(ctx context.Context) (*Conn, error) {
 		c.streamsMap.UseResetMaps()
 	}
 	return c, nil
-}
-
-// estimateMaxPayloadSize estimates the maximum payload size for short header packets.
-// It is not very sophisticated: it just subtracts the size of header (assuming the maximum
-// connection ID length), and the size of the encryption tag.
-func estimateMaxPayloadSize(mtu protocol.ByteCount) protocol.ByteCount {
-	return mtu - 1 /* type byte */ - 20 /* maximum connection ID length */ - 16 /* tag size */
 }
