@@ -590,6 +590,7 @@ func testClientConnGoAway(t *testing.T, withStream bool) {
 	clientConn, serverConn := newConnPair(t, withClientRecorder(&clientEventRecorder))
 
 	cc := (&Transport{}).NewClientConn(clientConn)
+	require.True(t, cc.CanTakeNewRequest())
 
 	var str *RequestStream
 	if withStream {
@@ -614,6 +615,8 @@ func testClientConnGoAway(t *testing.T, withStream bool) {
 			t.Fatal("connection closed")
 		case <-time.After(scaleDuration(10 * time.Millisecond)):
 		}
+
+		require.Eventually(t, func() bool { return !cc.CanTakeNewRequest() }, time.Second, time.Millisecond)
 
 		// the stream ID in the GOAWAY frame is 8, so it's possible to open stream 4
 		str2, err := cc.OpenRequestStream(context.Background())
@@ -874,4 +877,12 @@ func TestRawClientConnHandleUnidirectionalStream(t *testing.T) {
 		t.Fatal("timeout waiting for settings")
 	}
 	require.NotNil(t, cc.Settings())
+}
+
+func TestClientConnCanTakeNewRequestAfterClose(t *testing.T) {
+	client, _ := newConnPair(t)
+	cc := (&Transport{}).NewClientConn(client)
+	require.True(t, cc.CanTakeNewRequest())
+	require.NoError(t, client.CloseWithError(0, ""))
+	require.False(t, cc.CanTakeNewRequest())
 }

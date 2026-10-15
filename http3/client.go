@@ -135,6 +135,16 @@ func newClientConn(
 	return c
 }
 
+// CanTakeNewRequest reports whether the connection is open and has not received GOAWAY.
+// A false result lets connection pools retire a draining connection while existing
+// streams finish. A true result does not reserve a stream or guarantee that a
+// subsequent request will succeed.
+func (c *ClientConn) CanTakeNewRequest() bool {
+	c.streamMx.Lock()
+	defer c.streamMx.Unlock()
+	return c.maxStreamID == invalidStreamID && c.conn.Context().Err() == nil
+}
+
 // OpenRequestStream opens a new request stream on the HTTP/3 connection.
 func (c *ClientConn) OpenRequestStream(ctx context.Context) (*RequestStream, error) {
 	return c.openRequestStream(ctx, c.requestWriter, nil, c.disableCompression, c.maxResponseHeaderBytes)
