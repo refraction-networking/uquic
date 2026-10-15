@@ -250,6 +250,10 @@ func (c *rawConn) handleControlStream(str *quic.ReceiveStream) {
 }
 
 func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
+	return c.sendDatagramWithCancel(streamID, b, nil)
+}
+
+func (c *rawConn) sendDatagramWithCancel(streamID quic.StreamID, b []byte, cancel <-chan struct{}) error {
 	// TODO: this creates a lot of garbage and an additional copy
 	data := make([]byte, 0, len(b)+8)
 	quarterStreamID := uint64(streamID / 4)
@@ -264,7 +268,7 @@ func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
 			},
 		})
 	}
-	return c.conn.SendDatagram(data)
+	return c.conn.SendDatagramWithCancel(data, cancel)
 }
 
 func (c *rawConn) receiveDatagrams() error {

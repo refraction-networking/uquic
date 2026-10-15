@@ -500,3 +500,16 @@ func testConnDatagramFailures(t *testing.T, datagram []byte) {
 		t.Fatal("timeout waiting for close")
 	}
 }
+
+func TestConnCancelledDatagram(t *testing.T) {
+	client, _ := newConnPair(t, withDatagrams())
+	cc := (&Transport{EnableDatagrams: true}).NewClientConn(client)
+	stream, err := cc.OpenRequestStream(context.Background())
+	require.NoError(t, err)
+	cancel := make(chan struct{})
+	close(cancel)
+	require.ErrorIs(t, stream.SendDatagramWithCancel([]byte("cancelled"), cancel), context.Canceled)
+	require.NoError(t, stream.SendDatagramWithCancel([]byte("admitted"), nil))
+	stream.CancelWrite(0)
+	require.ErrorIs(t, stream.SendDatagramWithCancel([]byte("closed"), nil), context.Canceled)
+}

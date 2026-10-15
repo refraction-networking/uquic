@@ -178,3 +178,39 @@ func TestDatagramQueueClose(t *testing.T) {
 		}
 	})
 }
+
+func TestDatagramQueueCancelledAdmission(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		queue := newDatagramQueue(func() {}, utils.DefaultLogger)
+		for range maxDatagramSendQueueLen {
+			require.NoError(t, queue.Add(&wire.DatagramFrame{Data: []byte("queued")}))
+		}
+		cancel := make(chan struct{})
+		done := make(chan error, 1)
+		go func() { done <- queue.AddWithCancel(&wire.DatagramFrame{Data: []byte("cancelled")}, cancel) }()
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("send must wait for queue space")
+		default:
+		}
+		close(cancel)
+		synctest.Wait()
+		require.ErrorIs(t, <-done, context.Canceled)
+		for range maxDatagramSendQueueLen {
+			require.Equal(t, []byte("queued"), queue.Peek().Data)
+			queue.Pop()
+		}
+		require.Nil(t, queue.Peek())
+		require.NoError(t, queue.Add(&wire.DatagramFrame{Data: []byte("new")}))
+		require.Equal(t, []byte("new"), queue.Peek().Data)
+	})
+}
+
+func TestDatagramQueuePreCancelledAdmission(t *testing.T) {
+	queue := newDatagramQueue(func() { t.Fatal("cancelled datagram became available") }, utils.DefaultLogger)
+	cancel := make(chan struct{})
+	close(cancel)
+	require.ErrorIs(t, queue.AddWithCancel(&wire.DatagramFrame{}, cancel), context.Canceled)
+	require.Nil(t, queue.Peek())
+}

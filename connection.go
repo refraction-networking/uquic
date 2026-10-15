@@ -3023,6 +3023,14 @@ func (c *Conn) onStreamCompleted(id protocol.StreamID) {
 // In addition, a datagram may be dropped before being sent out if the available packet size suddenly decreases.
 // If the payload is too large to be sent at the current time, a DatagramTooLargeError is returned.
 func (c *Conn) SendDatagram(p []byte) error {
+	return c.SendDatagramWithCancel(p, nil)
+}
+
+// SendDatagramWithCancel sends a QUIC datagram with cancellable queue admission.
+// Closing cancel interrupts a wait for queue space. A context.Canceled result
+// means the datagram was not enqueued. Cancellation cannot retract an admitted
+// datagram; a nil channel is equivalent to SendDatagram.
+func (c *Conn) SendDatagramWithCancel(p []byte, cancel <-chan struct{}) error {
 	if !c.supportsDatagrams() {
 		return errors.New("datagram support disabled")
 	}
@@ -3039,7 +3047,7 @@ func (c *Conn) SendDatagram(p []byte) error {
 	}
 	f.Data = make([]byte, len(p))
 	copy(f.Data, p)
-	return c.datagramQueue.Add(f)
+	return c.datagramQueue.AddWithCancel(f, cancel)
 }
 
 // ReceiveDatagram gets a message received in a QUIC datagram, as specified in RFC 9221.
