@@ -610,7 +610,12 @@ func (p *uPacketPacker) PackPTOProbePacket(
 		hdrLen := wire.ShortHeaderLen(connID, pnLen)
 		pl := p.maybeGetAppDataPacket(maxPacketSize-protocol.ByteCount(s.Overhead())-hdrLen, false, true, now, v)
 		if pl.length == 0 {
-			return nil, nil
+			if !addPingIfEmpty {
+				return nil, nil
+			}
+			ping := &wire.PingFrame{}
+			pl.frames = append(pl.frames, ackhandler.Frame{Frame: ping, Handler: emptyHandler{}})
+			pl.length += ping.Length(v)
 		}
 		buffer := getPacketBuffer()
 		packet := &coalescedPacket{buffer: buffer}
