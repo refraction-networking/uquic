@@ -187,6 +187,9 @@ func (p *uPacketPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteC
 			// TODO: uQUIC should send Initial Packet ACK if requested.
 			// However, it should be otherwise configurable whether to request
 			// to send Initial Packet ACK or not. See quic-go#4007
+			if err := p.checkInitialPacketNumberLen(initialHdr); err != nil { // [UQUIC]
+				return nil, err
+			}
 			padding := p.initialPaddingLen(initialPayload.frames, size, maxSize)
 			cont, err := p.appendLongHeaderPacket(buffer, initialHdr, initialPayload, padding, protocol.EncryptionInitial, initialSealer, v)
 			if err != nil {
@@ -240,6 +243,9 @@ func (p *uPacketPacker) appendInitialPacket(buffer *packetBuffer, header *wire.E
 // appendInitialPacket that a pre-planned flight datagram shares, since a
 // QUICFlightFrameBuilder produces uPayload itself. [UQUIC]
 func (p *uPacketPacker) appendInitialPacketPayload(buffer *packetBuffer, header *wire.ExtendedHeader, pl payload, uPayload []byte, idx int, encLevel protocol.EncryptionLevel, sealer sealer, v protocol.Version) (*longHeaderPacket, error) {
+	if err := p.checkInitialPacketNumberLen(header); err != nil {
+		return nil, err
+	}
 	pnLen := protocol.ByteCount(header.PacketNumberLen)
 
 	// [UQUIC] Exact-size padding: append PADDING (0x00) bytes to the payload so the
@@ -304,6 +310,44 @@ func (p *uPacketPacker) appendInitialPacketPayload(buffer *packetBuffer, header 
 		streamFrames: pl.streamFrames,
 		length:       protocol.ByteCount(len(raw)),
 	}, nil
+}
+
+// largestAckedTracker is implemented by the sent packet handler of every uQUIC
+// connection (ackhandler.NewUAckHandler), which is the packer's pnManager. [UQUIC]
+type largestAckedTracker interface {
+	LargestAcked(protocol.EncryptionLevel) protocol.PacketNumber
+}
+
+// checkInitialPacketNumberLen refuses to send an Initial whose packet number the peer
+// cannot decode from the length in its header. [UQUIC]
+//
+// The header's length comes from PeekPacketNumber, which returns whatever the spec's
+// InitPacketNumberLength / InitPacketNumberLengths force, with no check that the packet
+// number fits: a spec whose first packet number is 255 with a 1-byte length sends
+// packet number 256 as 0x00, which a server that has not yet processed packet 255
+// decodes as 0, so the packet fails AEAD and is dropped. Widening the length here
+// would quietly move the connection out of the fingerprint the spec describes, so
+// this is an error that names the packet number and both lengths instead.
+//
+// Only a forced length can fail: without one, PeekPacketNumber falls back to
+// PacketNumberLengthForHeader, which is never shorter than MinPacketNumberLen.
+// Upstream's PackConnectionClose does not come through here, so the
+// CONNECTION_CLOSE that follows this error still carries the forced length.
+func (p *uPacketPacker) checkInitialPacketNumberLen(header *wire.ExtendedHeader) error {
+	t, ok := p.pnManager.(largestAckedTracker)
+	if !ok {
+		return nil
+	}
+	largestAcked := t.LargestAcked(protocol.EncryptionInitial)
+	needed := protocol.MinPacketNumberLen(header.PacketNumber, largestAcked)
+	if header.PacketNumberLen >= needed {
+		return nil
+	}
+	acked := "none"
+	if largestAcked != protocol.InvalidPacketNumber {
+		acked = fmt.Sprintf("%d", largestAcked)
+	}
+	return fmt.Errorf("uquic: Initial packet number %d does not fit the %d-byte packet number length the QUICSpec forces (InitPacketNumberLength(s)); the peer needs at least %d bytes to decode it (largest acknowledged Initial: %s; RFC 9000 Section 17.1)", header.PacketNumber, header.PacketNumberLen, needed, acked)
 }
 
 // planInitialFlight lays out the entire Initial flight up front, when the spec's

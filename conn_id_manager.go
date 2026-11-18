@@ -40,6 +40,11 @@ type connIDManager struct {
 	queueControlFrame         func(wire.Frame)
 
 	closed bool
+
+	// [UQUIC] activeConnectionIDLimit is the active_connection_id_limit we
+	// advertised in our transport parameters (see SetConnectionIDLimit).
+	// 0 means unset: fall back to protocol.MaxActiveConnectionIDs.
+	activeConnectionIDLimit uint64
 }
 
 func newConnIDManager(
@@ -65,7 +70,7 @@ func (h *connIDManager) Add(f *wire.NewConnectionIDFrame) error {
 	if err := h.add(f); err != nil {
 		return err
 	}
-	if len(h.queue) >= protocol.MaxActiveConnectionIDs {
+	if uint64(len(h.queue)) >= h.connectionIDLimit() { // [UQUIC] was protocol.MaxActiveConnectionIDs
 		return &qerr.TransportError{ErrorCode: qerr.ConnectionIDLimitError}
 	}
 	return nil
@@ -231,6 +236,7 @@ func (h *connIDManager) shouldUpdateConnID() bool {
 	// For later changes, only change if
 	// 1. The queue of connection IDs is filled more than 50%.
 	// 2. We sent at least PacketsPerConnectionID packets
+	// [UQUIC] Intentionally not h.connectionIDLimit(): see SetConnectionIDLimit.
 	return 2*len(h.queue) >= protocol.MaxActiveConnectionIDs &&
 		h.packetsSinceLastChange >= h.packetsPerConnectionID
 }
