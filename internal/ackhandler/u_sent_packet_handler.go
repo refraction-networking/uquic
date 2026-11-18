@@ -46,6 +46,15 @@ func (h *uSentPacketHandler) PeekPacketNumber(encLevel protocol.EncryptionLevel)
 	return pn, protocol.PacketNumberLengthForHeader(pn, pnSpace.largestAcked)
 }
 
+// [UQUIC] LargestAcked returns the largest packet number the peer has acknowledged in
+// encLevel's packet number space, or protocol.InvalidPacketNumber if it has
+// acknowledged none. The packer uses it to check that a packet number length forced
+// by the QUICSpec can still be decoded (see protocol.MinPacketNumberLen), since
+// PeekPacketNumber returns the forced length as is.
+func (h *uSentPacketHandler) LargestAcked(encLevel protocol.EncryptionLevel) protocol.PacketNumber {
+	return h.getPacketNumberSpace(encLevel).largestAcked
+}
+
 // SetInitialPacketNumberLength sets a single PN encoding length used for ALL Initial packets.
 // Deprecated: prefer SetInitialPacketNumberLengths for per-packet control.
 func SetInitialPacketNumberLength(h SentPacketHandler, pnLen protocol.PacketNumberLen) {

@@ -43,6 +43,13 @@ type InitialPacketSpec struct {
 	//
 	// Example (Chrome 146): []PacketNumberLen{1, 2} — 1-byte encoding for PN=1,
 	// 2-byte encoding for PN=2.
+	//
+	// A forced length is used as is, never widened: packing an Initial fails with an
+	// error if its packet number does not fit the length (see
+	// protocol.MinPacketNumberLen). Before the server acknowledges anything, that
+	// means 1 byte covers packet numbers up to 255, so a 1-byte entry that repeats
+	// must leave room for the PTO retransmissions too. The same holds for
+	// InitPacketNumberLength.
 	InitPacketNumberLengths []PacketNumberLen // [UQUIC]
 
 	// InitPacketNumber is the packet number of the first Initial packet. Following
