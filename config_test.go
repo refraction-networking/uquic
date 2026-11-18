@@ -124,6 +124,8 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 			f.Set(reflect.ValueOf(uint16(1350)))
 		case "DisablePathMTUDiscovery":
 			f.Set(reflect.ValueOf(true))
+		case "DisableCongestionControl":
+			f.Set(reflect.ValueOf(true))
 		case "Allow0RTT":
 			f.Set(reflect.ValueOf(true))
 		case "EnableStreamResetPartialDelivery":
@@ -185,6 +187,7 @@ func TestConfigDefaultValues(t *testing.T) {
 	require.EqualValues(t, protocol.DefaultMaxIncomingStreams, c.MaxIncomingStreams)
 	require.EqualValues(t, protocol.DefaultMaxIncomingUniStreams, c.MaxIncomingUniStreams)
 	require.False(t, c.DisablePathMTUDiscovery)
+	require.False(t, c.DisableCongestionControl)
 	require.Nil(t, c.GetConfigForClient)
 }
 

@@ -318,6 +318,7 @@ var newConnection = func(
 		&s.connStats,
 		clientAddressValidated,
 		s.conn.capabilities().ECN,
+		s.config.DisableCongestionControl,
 		s.receivedPacketHandler.IgnorePacketsBelow,
 		s.perspective,
 		s.qlogger,
@@ -447,6 +448,7 @@ var newClientConnection = func(
 		&s.connStats,
 		false, // has no effect
 		s.conn.capabilities().ECN,
+		s.config.DisableCongestionControl,
 		s.receivedPacketHandler.IgnorePacketsBelow,
 		s.perspective,
 		s.qlogger,
