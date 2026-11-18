@@ -56,8 +56,9 @@ var (
 
 // QUICID2Spec returns the QUICSpec that mimics the client named by id, or an error for
 // an unknown ID. Each call builds a fresh spec, so per-spec random draws (GREASE
-// parameter IDs and lengths, ChromeRandomInitialRTT) are re-drawn — call it per
-// connection rather than caching one result if those values must vary.
+// parameter lengths, ChromeRandomInitialRTT) are re-drawn — call it per connection
+// rather than caching one result if those values must vary. GREASE parameter IDs and
+// values are drawn per connection either way, unless pinned (see QUICSpec).
 //
 // The returned spec is a starting point, not a frozen artifact: mutate its fields, or
 // set QUICSpec.SuppressTransportParameters, to derive a variant without restating the

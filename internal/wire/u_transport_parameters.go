@@ -12,6 +12,11 @@ import (
 // PopulateFromUQUIC sets TransportParameters fields from a uTLS TransportParameters slice
 // (from QUICTransportParametersExtension) and stores the marshaled bytes as ClientOverride
 // so that Marshal/MarshalForSessionTicket reproduce the exact user-specified encoding.
+//
+// It writes into quicparams: a zero-length InitialSourceConnectionID is replaced by
+// tp.InitialSourceConnectionID, so the ClientHello carries the real source connection ID.
+// quicparams must therefore belong to a single connection, never to a QUICSpec that
+// later connections reuse.
 func (tp *TransportParameters) PopulateFromUQUIC(quicparams tls.TransportParameters) {
 	for pIdx, param := range quicparams {
 		switch param.ID() {
