@@ -115,6 +115,7 @@ func testSentPacketHandlerSendAndAcknowledge(t *testing.T, encLevel protocol.Enc
 		&utils.ConnectionStats{},
 		false,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveClient,
 		nil,
@@ -170,6 +171,7 @@ func TestSentPacketHandlerAcknowledgeSkippedPacket(t *testing.T) {
 		&utils.ConnectionStats{},
 		false,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveClient,
 		nil,
@@ -211,6 +213,7 @@ func TestSentPacketHandlerRTTAckEliciting(t *testing.T) {
 		1200,
 		rttStats,
 		&utils.ConnectionStats{},
+		false,
 		false,
 		false,
 		nil,
@@ -301,6 +304,7 @@ func TestSentPacketHandlerRTTAcrossPacketNumberSpaces(t *testing.T) {
 		&utils.ConnectionStats{},
 		false,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveClient,
 		nil,
@@ -360,6 +364,7 @@ func testSentPacketHandlerRTTAckDelays(t *testing.T, encLevel protocol.Encryptio
 		1200,
 		rttStats,
 		&utils.ConnectionStats{},
+		false,
 		false,
 		false,
 		nil,
@@ -453,6 +458,7 @@ func testSentPacketHandlerAmplificationLimitServer(t *testing.T, addressValidate
 		&utils.ConnectionStats{},
 		addressValidated,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveServer,
 		nil,
@@ -524,6 +530,7 @@ func testSentPacketHandlerAmplificationLimitClient(t *testing.T, dropHandshake b
 		&utils.ConnectionStats{},
 		true,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveClient,
 		nil,
@@ -580,6 +587,7 @@ func TestSentPacketHandlerDelayBasedLossDetection(t *testing.T) {
 		&utils.ConnectionStats{},
 		true,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveServer,
 		nil,
@@ -634,6 +642,7 @@ func TestSentPacketHandlerPacketBasedLossDetection(t *testing.T) {
 		rttStats,
 		&utils.ConnectionStats{},
 		true,
+		false,
 		false,
 		nil,
 		protocol.PerspectiveServer,
@@ -696,6 +705,7 @@ func testSentPacketHandlerPTO(t *testing.T, encLevel protocol.EncryptionLevel, p
 		rttStats,
 		&utils.ConnectionStats{},
 		true,
+		false,
 		false,
 		nil,
 		protocol.PerspectiveServer,
@@ -915,6 +925,7 @@ func TestSentPacketHandlerPacketNumberSpacesPTO(t *testing.T) {
 		&utils.ConnectionStats{},
 		true,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveServer,
 		nil,
@@ -1008,6 +1019,7 @@ func TestSentPacketHandler0RTT(t *testing.T) {
 		&utils.ConnectionStats{},
 		true,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveClient,
 		nil,
@@ -1059,6 +1071,7 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 		rttStats,
 		&utils.ConnectionStats{},
 		true,
+		false,
 		false,
 		nil,
 		protocol.PerspectiveServer,
@@ -1161,6 +1174,7 @@ func testSentPacketHandlerRetry(t *testing.T, rtt, expectedRTT time.Duration) {
 		&utils.ConnectionStats{},
 		true,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveClient,
 		nil,
@@ -1213,6 +1227,7 @@ func TestSentPacketHandlerRetryAfterPTO(t *testing.T) {
 		&utils.ConnectionStats{},
 		true,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveClient,
 		nil,
@@ -1257,6 +1272,7 @@ func TestSentPacketHandlerECN(t *testing.T) {
 		utils.NewRTTStats(),
 		&utils.ConnectionStats{},
 		true,
+		false,
 		false,
 		nil,
 		protocol.PerspectiveClient,
@@ -1363,6 +1379,7 @@ func TestSentPacketHandlerPathProbe(t *testing.T) {
 		&utils.ConnectionStats{},
 		true,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveClient,
 		nil,
@@ -1444,6 +1461,7 @@ func TestSentPacketHandlerPathProbeAckAndLoss(t *testing.T) {
 		&utils.ConnectionStats{},
 		true,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveClient,
 		nil,
@@ -1521,6 +1539,7 @@ func testSentPacketHandlerRandomized(t *testing.T, seed uint64) {
 		&utils.ConnectionStats{},
 		true,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveClient,
 		nil,
@@ -1590,6 +1609,7 @@ func TestSentPacketHandlerSpuriousLoss(t *testing.T) {
 		utils.NewRTTStats(),
 		&utils.ConnectionStats{},
 		true,
+		false,
 		false,
 		nil,
 		protocol.PerspectiveClient,
@@ -1727,6 +1747,7 @@ func benchmarkSendAndAcknowledge(b *testing.B, ackEvery, inFlight int) {
 		&utils.ConnectionStats{},
 		true,
 		false,
+		false,
 		nil,
 		protocol.PerspectiveClient,
 		nil,
@@ -1768,5 +1789,36 @@ func benchmarkSendAndAcknowledge(b *testing.B, ackEvery, inFlight int) {
 			pns = append(pns[:0], pns[ackEvery:]...)
 			ranges = ranges[:0]
 		}
+	}
+}
+
+func TestSentPacketHandlerCongestionControlDisabled(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disabled=%t", disabled), func(t *testing.T) {
+			sph := NewSentPacketHandler(
+				0,
+				1200,
+				utils.NewRTTStats(),
+				&utils.ConnectionStats{},
+				false,
+				false,
+				disabled,
+				nil,
+				protocol.PerspectiveClient,
+				nil,
+				utils.DefaultLogger,
+			)
+			var packets packetTracker
+			now := monotime.Now()
+			// A megabyte at once, unacknowledged: far beyond any initial
+			// congestion window, and its pacing.
+			var sent int
+			for sent < 1000 && sph.SendMode(now) == SendAny {
+				pn := sph.PopPacketNumber(protocol.Encryption1RTT)
+				sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.Encryption1RTT, protocol.ECNNon, 1000, false, false)
+				sent++
+			}
+			require.Equal(t, disabled, sent == 1000, "sent %d packets", sent)
+		})
 	}
 }

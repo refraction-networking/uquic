@@ -106,6 +106,8 @@ type sentPacketHandler struct {
 	enableECN  bool
 	ecnTracker ecnHandler
 
+	disableCongestionControl bool
+
 	perspective protocol.Perspective
 
 	qlogger     qlogwriter.Recorder
@@ -124,20 +126,12 @@ func NewSentPacketHandler(
 	connStats *utils.ConnectionStats,
 	clientAddressValidated bool,
 	enableECN bool,
+	disableCongestionControl bool,
 	ignorePacketsBelow func(protocol.PacketNumber),
 	pers protocol.Perspective,
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
 ) SentPacketHandler {
-	congestion := congestion.NewCubicSender(
-		congestion.DefaultClock{},
-		rttStats,
-		connStats,
-		initialMaxDatagramSize,
-		true, // use Reno
-		qlogger,
-	)
-
 	h := &sentPacketHandler{
 		peerCompletedAddressValidation: pers == protocol.PerspectiveServer,
 		peerAddressValidated:           pers == protocol.PerspectiveClient || clientAddressValidated,
@@ -147,17 +141,34 @@ func NewSentPacketHandler(
 		lostPackets:                    *newLostPacketTracker(64),
 		rttStats:                       rttStats,
 		connStats:                      connStats,
-		congestion:                     congestion,
+		disableCongestionControl:       disableCongestionControl,
 		ignorePacketsBelow:             ignorePacketsBelow,
 		perspective:                    pers,
 		qlogger:                        qlogger,
 		logger:                         logger,
 	}
+	h.congestion = h.newCongestion(initialMaxDatagramSize)
 	if enableECN {
 		h.enableECN = true
 		h.ecnTracker = newECNTracker(logger, qlogger)
 	}
 	return h
+}
+
+// newCongestion is a new congestion controller, unless congestion control
+// is disabled.
+func (h *sentPacketHandler) newCongestion(initialMaxDatagramSize protocol.ByteCount) congestion.SendAlgorithmWithDebugInfos {
+	if h.disableCongestionControl {
+		return congestion.NewUncontrolled()
+	}
+	return congestion.NewCubicSender(
+		congestion.DefaultClock{},
+		h.rttStats,
+		h.connStats,
+		initialMaxDatagramSize,
+		true, // use Reno
+		h.qlogger,
+	)
 }
 
 func (h *sentPacketHandler) removeFromBytesInFlight(p *packet) {
@@ -1131,13 +1142,6 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 	for pn := range h.appDataPackets.history.PathProbes() {
 		h.appDataPackets.history.RemovePathProbe(pn)
 	}
-	h.congestion = congestion.NewCubicSender(
-		congestion.DefaultClock{},
-		h.rttStats,
-		h.connStats,
-		initialMaxDatagramSize,
-		true, // use Reno
-		h.qlogger,
-	)
+	h.congestion = h.newCongestion(initialMaxDatagramSize)
 	h.setLossDetectionTimer(now)
 }
