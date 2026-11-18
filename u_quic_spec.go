@@ -22,12 +22,19 @@ const (
 //	ut := &quic.UTransport{Transport: &quic.Transport{Conn: pc}, QUICSpec: spec}
 //	conn, err := ut.Dial(ctx, addr, tlsConf, conf)
 //
+// Dialing leaves the spec as it was, so one spec value can serve many connections,
+// e.g. an http3.Transport that re-dials. Each connection applies its transport
+// parameter rewrites (suppression, the shuffle, the real source connection ID) to its
+// own copy of the transport parameters extension, and uTLS's ApplyPreset copies the
+// extensions it fills in per connection (key shares, GREASE, padding and others).
+//
 // Fields that randomize per connection (RandomizeTransportParameters, a
 // QUICRandomFrames FrameBuilder, ClientTokenPrefix's random tail) are re-drawn on
-// every dial, so one spec value can serve many connections. Fields whose value is
-// itself random — a GREASE transport parameter's ID, VariableLengthGREASEQTP's
-// length — are drawn once when the spec is built, so build a fresh spec per
-// connection if those must vary too.
+// every dial. So are a GREASE transport parameter's ID and value, unless the spec
+// fixes them: set explicitly, or pinned by calling the parameter's ID (which
+// TransportParameterIDs does). Values chosen when the spec is built stay fixed, e.g.
+// VariableLengthGREASEQTP's length, so build a fresh spec per connection if those must
+// vary too.
 type QUICSpec struct {
 	// InitialPacketSpec specifies the QUIC Initial Packet, which includes Initial
 	// Packet Headers and Frames.
@@ -48,9 +55,9 @@ type QUICSpec struct {
 	// random permutation per connection, before they are serialized into the Initial
 	// CRYPTO stream. This mirrors real Chrome, which randomizes the QTP wire order on
 	// every handshake; without it the parameter order is fixed by the spec and becomes
-	// a trivial discriminator signal. The shuffle reorders the extension's parameter
-	// slice in place at connection-setup time (so a freshly built spec randomizes each
-	// connection); it does not change which parameters or values are sent.
+	// a trivial discriminator signal. The shuffle reorders the connection's copy of the
+	// parameter list at connection-setup time, so every dial from one spec gets its own
+	// order; it does not change which parameters or values are sent.
 	RandomizeTransportParameters bool
 
 	// SuppressTransportParameters lists QUIC transport parameter IDs to drop from the
