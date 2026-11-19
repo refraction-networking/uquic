@@ -3226,6 +3226,8 @@ func testConnectionPathValidation(t *testing.T, isNATRebinding bool) {
 		)
 		require.NoError(t, tc.conn.handleTransportParameters(&wire.TransportParameters{MaxUDPPayloadSize: 1456}))
 
+		tc.conn.currentPacketMTU.Store(1452)
+
 		newRemoteAddr := &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 1234}
 		require.NotEqual(t, tc.remoteAddr, newRemoteAddr)
 
@@ -3348,6 +3350,8 @@ func testConnectionPathValidation(t *testing.T, isNATRebinding bool) {
 		default:
 			t.Fatal("should have migrated")
 		}
+
+		assert.Equal(t, uint32(tc.conn.config.InitialPacketSize), tc.conn.currentPacketMTU.Load(), "migration must reset the datagram packet budget")
 
 		// test teardown
 		tc.connRunner.EXPECT().Remove(gomock.Any()).AnyTimes()
