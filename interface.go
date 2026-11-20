@@ -177,6 +177,11 @@ type Config struct {
 	// This allows the sending of QUIC packets that fully utilize the available MTU of the path.
 	// Path MTU discovery is only available on systems that allow setting of the Don't Fragment (DF) bit.
 	DisablePathMTUDiscovery bool
+	// DisableCongestionControl disables congestion control, for a connection
+	// whose packets travel over a transport that controls congestion itself,
+	// such as a TCP connection. QUIC then sends as fast as the transport takes
+	// its packets.
+	DisableCongestionControl bool
 	// Allow0RTT allows the application to decide if a 0-RTT connection attempt should be accepted.
 	// Only valid for the server.
 	Allow0RTT bool

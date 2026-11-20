@@ -16,12 +16,13 @@ func NewUAckHandler(
 	connStats *utils.ConnectionStats,
 	clientAddressValidated bool,
 	enableECN bool,
+	disableCongestionControl bool,
 	ignorePacketsBelow func(protocol.PacketNumber),
 	pers protocol.Perspective,
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
 ) SentPacketHandler {
-	sph := NewSentPacketHandler(initialPacketNumber, initialMaxDatagramSize, rttStats, connStats, clientAddressValidated, enableECN, ignorePacketsBelow, pers, qlogger, logger)
+	sph := NewSentPacketHandler(initialPacketNumber, initialMaxDatagramSize, rttStats, connStats, clientAddressValidated, enableECN, disableCongestionControl, ignorePacketsBelow, pers, qlogger, logger)
 	return &uSentPacketHandler{
 		sentPacketHandler: sph.(*sentPacketHandler),
 	}
